@@ -6,6 +6,11 @@ export interface ConversationAttrs {
   state: ConversationState;
 }
 
+interface ConversationTimestamps {
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 const conversationSchema = new Schema<ConversationAttrs>(
   {
     sellerId: { type: String, required: true },
@@ -21,22 +26,30 @@ const conversationSchema = new Schema<ConversationAttrs>(
 
 conversationSchema.index({ sellerId: 1 });
 
-export type ConversationDocument = HydratedDocument<ConversationAttrs>;
+export type ConversationDocument = HydratedDocument<
+  ConversationAttrs & ConversationTimestamps
+>;
 export const ConversationModel = model<ConversationAttrs>(
   "Conversation",
   conversationSchema,
 );
 
+// `timestamps: true` adds createdAt/updatedAt at runtime, but mongoose's
+// generic typing doesn't reflect schema options, so the documents returned
+// below are cast to the timestamped ConversationDocument type.
+
 export async function createConversation(
   sellerId: string,
 ): Promise<ConversationDocument> {
-  return ConversationModel.create({ sellerId, state: "collecting" });
+  const doc = await ConversationModel.create({ sellerId, state: "collecting" });
+  return doc as ConversationDocument;
 }
 
 export async function findConversationById(
   id: string,
 ): Promise<ConversationDocument | null> {
-  return ConversationModel.findById(id);
+  const doc = await ConversationModel.findById(id);
+  return doc as ConversationDocument | null;
 }
 
 export async function updateConversationState(
@@ -44,5 +57,6 @@ export async function updateConversationState(
   state: ConversationState,
 ): Promise<ConversationDocument> {
   conversation.state = state;
-  return conversation.save();
+  const saved = await conversation.save();
+  return saved as ConversationDocument;
 }

@@ -21,21 +21,29 @@ const itemDraftSchema = new Schema<ItemDraftAttrs>(
   { timestamps: true },
 );
 
-export type ItemDraftDocument = HydratedDocument<ItemDraftAttrs>;
+export type ItemDraftDocument = HydratedDocument<
+  ItemDraftAttrs & { createdAt: Date; updatedAt: Date }
+>;
 export const ItemDraftModel = model<ItemDraftAttrs>("ItemDraft", itemDraftSchema);
+
+// `timestamps: true` adds createdAt/updatedAt at runtime, but mongoose's
+// generic typing doesn't reflect schema options, so results are cast to the
+// timestamped ItemDraftDocument type.
 
 export async function createItemDraft(
   conversationId: string,
   attributes: ItemAttributes,
   missingFields: string[],
 ): Promise<ItemDraftDocument> {
-  return ItemDraftModel.create({ conversationId, attributes, missingFields });
+  const doc = await ItemDraftModel.create({ conversationId, attributes, missingFields });
+  return doc as ItemDraftDocument;
 }
 
 export async function findItemDraftByConversation(
   conversationId: string,
 ): Promise<ItemDraftDocument | null> {
-  return ItemDraftModel.findOne({ conversationId });
+  const doc = await ItemDraftModel.findOne({ conversationId });
+  return doc as ItemDraftDocument | null;
 }
 
 export async function updateItemDraft(
@@ -45,5 +53,6 @@ export async function updateItemDraft(
 ): Promise<ItemDraftDocument> {
   draft.attributes = ItemAttributesSchema.parse(attributes);
   draft.missingFields = missingFields;
-  return draft.save();
+  const saved = await draft.save();
+  return saved as ItemDraftDocument;
 }

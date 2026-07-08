@@ -36,8 +36,12 @@ messageSchema.pre("findOneAndUpdate", rejectMutation);
 messageSchema.pre("deleteOne", rejectMutation);
 messageSchema.pre("findOneAndDelete", rejectMutation);
 
-export type MessageDocument = HydratedDocument<MessageAttrs>;
+export type MessageDocument = HydratedDocument<MessageAttrs & { createdAt: Date }>;
 export const MessageModel = model<MessageAttrs>("Message", messageSchema);
+
+// `timestamps: { createdAt: true }` adds createdAt at runtime, but mongoose's
+// generic typing doesn't reflect schema options, so results are cast to the
+// timestamped MessageDocument type.
 
 export async function createMessage(input: {
   conversationId: string;
@@ -45,26 +49,30 @@ export async function createMessage(input: {
   content: string;
   clientMessageId: string;
 }): Promise<MessageDocument> {
-  return MessageModel.create(input);
+  const doc = await MessageModel.create(input);
+  return doc as MessageDocument;
 }
 
 export async function findMessageByClientId(
   conversationId: string,
   clientMessageId: string,
 ): Promise<MessageDocument | null> {
-  return MessageModel.findOne({ conversationId, clientMessageId });
+  const doc = await MessageModel.findOne({ conversationId, clientMessageId });
+  return doc as MessageDocument | null;
 }
 
 export async function findMessagesByConversation(
   conversationId: string,
 ): Promise<MessageDocument[]> {
-  return MessageModel.find({ conversationId }).sort({ createdAt: 1 });
+  const docs = await MessageModel.find({ conversationId }).sort({ createdAt: 1 });
+  return docs as MessageDocument[];
 }
 
 export async function findLatestAssistantMessage(
   conversationId: string,
 ): Promise<MessageDocument | null> {
-  return MessageModel.findOne({ conversationId, role: "assistant" }).sort({
+  const doc = await MessageModel.findOne({ conversationId, role: "assistant" }).sort({
     createdAt: -1,
   });
+  return doc as MessageDocument | null;
 }
