@@ -7,8 +7,15 @@ import type {
   ItemDraft,
   ListingDraft,
   Message,
+  UpdateListingRequest,
 } from "@seller/shared";
-import { createConversation, getConversation, sendMessage as sendMessageApi } from "../api/conversations.js";
+import {
+  approveListing as approveListingApi,
+  createConversation,
+  getConversation,
+  sendMessage as sendMessageApi,
+  updateListing as updateListingApi,
+} from "../api/conversations.js";
 import { toUiError, type UiError } from "../utils/conversationState.js";
 
 export interface ConversationView {
@@ -23,13 +30,22 @@ export interface ConversationUiState {
   conversation: ConversationView | null;
   isInitializing: boolean;
   isSending: boolean;
+  isApprovingListing: boolean;
+  isUpdatingListing: boolean;
   error: UiError | null;
   /** Attribute keys whose value changed on the most recent backend update. */
   changedFields: ReadonlySet<string>;
 }
 
+export interface ListingActionResult {
+  ok: boolean;
+  error?: string;
+}
+
 export interface UseConversationResult extends ConversationUiState {
   sendMessage: (content: string) => Promise<boolean>;
+  updateListing: (input: UpdateListingRequest) => Promise<ListingActionResult>;
+  approveListing: () => Promise<ListingActionResult>;
   startNewListing: () => Promise<void>;
   dismissError: () => void;
 }
@@ -76,6 +92,8 @@ export function useConversation(sellerId: string): UseConversationResult {
   const [conversation, setConversation] = useState<ConversationView | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [isSending, setIsSending] = useState(false);
+  const [isUpdatingListing, setIsUpdatingListing] = useState(false);
+  const [isApprovingListing, setIsApprovingListing] = useState(false);
   const [error, setError] = useState<UiError | null>(null);
   const [changedFields, setChangedFields] = useState<ReadonlySet<string>>(new Set());
   const previousAttributesRef = useRef<ItemAttributes | null>(null);
@@ -135,15 +153,62 @@ export function useConversation(sellerId: string): UseConversationResult {
     await initialize();
   }, [initialize]);
 
+  const updateListing = useCallback(
+    async (input: UpdateListingRequest): Promise<ListingActionResult> => {
+      if (!conversation || isUpdatingListing || isApprovingListing) {
+        return { ok: false, error: "The listing is not ready to update." };
+      }
+
+      setIsUpdatingListing(true);
+      try {
+        const fresh = await updateListingApi(conversation.id, input);
+        const view = fromGetResponse(fresh);
+        setChangedFields(new Set());
+        previousAttributesRef.current = view.itemDraft?.attributes ?? null;
+        setConversation(view);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: toUiError(err, "listing").message };
+      } finally {
+        setIsUpdatingListing(false);
+      }
+    },
+    [conversation, isApprovingListing, isUpdatingListing],
+  );
+
+  const approveListing = useCallback(async (): Promise<ListingActionResult> => {
+    if (!conversation || isApprovingListing || isUpdatingListing) {
+      return { ok: false, error: "The listing is not ready to approve." };
+    }
+
+    setIsApprovingListing(true);
+    try {
+      const fresh = await approveListingApi(conversation.id);
+      const view = fromGetResponse(fresh);
+      setChangedFields(new Set());
+      previousAttributesRef.current = view.itemDraft?.attributes ?? null;
+      setConversation(view);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: toUiError(err, "approve").message };
+    } finally {
+      setIsApprovingListing(false);
+    }
+  }, [conversation, isApprovingListing, isUpdatingListing]);
+
   const dismissError = useCallback(() => setError(null), []);
 
   return {
     conversation,
     isInitializing,
     isSending,
+    isApprovingListing,
+    isUpdatingListing,
     error,
     changedFields,
     sendMessage,
+    updateListing,
+    approveListing,
     startNewListing,
     dismissError,
   };

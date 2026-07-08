@@ -3,6 +3,7 @@ import type { ConversationDocument } from "../models/Conversation.js";
 import type { ItemDraftDocument } from "../models/ItemDraft.js";
 import type { MessageDocument } from "../models/Message.js";
 import type { ListingDraftDocument } from "../models/ListingDraft.js";
+import type { ConversationDetail } from "../services/conversationService.js";
 
 export function serializeConversation(doc: ConversationDocument): Conversation {
   return {
@@ -48,5 +49,14 @@ export function serializeListingDraft(doc: ListingDraftDocument): ListingDraft {
     status: doc.status,
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
+  };
+}
+
+export function serializeConversationDetail(detail: ConversationDetail) {
+  return {
+    conversation: serializeConversation(detail.conversation),
+    itemDraft: detail.itemDraft ? serializeItemDraft(detail.itemDraft) : null,
+    messages: detail.messages.map(serializeMessage),
+    listingDraft: detail.listingDraft ? serializeListingDraft(detail.listingDraft) : null,
   };
 }

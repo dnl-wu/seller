@@ -16,14 +16,23 @@ vi.mock("../api/conversations.js", () => {
     }
   }
   return {
+    approveListing: vi.fn(),
     createConversation: vi.fn(),
     getConversation: vi.fn(),
     sendMessage: vi.fn(),
+    updateListing: vi.fn(),
     ApiError,
   };
 });
 
-import { ApiError, createConversation, getConversation, sendMessage } from "../api/conversations.js";
+import {
+  ApiError,
+  approveListing,
+  createConversation,
+  getConversation,
+  sendMessage,
+  updateListing,
+} from "../api/conversations.js";
 
 const SELLER_ID_KEY = "seller-agent:seller-id";
 
@@ -291,6 +300,116 @@ describe("SellerAgentPage", () => {
 
     expect(await screen.findByText("Nike Jacket, Size M")).toBeInTheDocument();
     expect(screen.getByText("CA$40.00")).toBeInTheDocument();
+  });
+
+  it("saves listing edits and replaces local state with the backend response", async () => {
+    vi.mocked(createConversation).mockResolvedValue({
+      conversationId: "conv-1",
+      state: "collecting",
+      itemDraft: makeItemDraft(),
+    });
+    vi.mocked(sendMessage).mockResolvedValue({
+      conversation: makeConversation("draft_ready"),
+      itemDraft: makeItemDraft(
+        { category: "clothing", brand: "nike", condition: "good", size: "M" },
+        [],
+      ),
+      assistantMessage: makeMessage("assistant", "Your listing draft is ready for review."),
+      listingDraft: makeListingDraft(),
+    });
+    vi.mocked(getConversation).mockResolvedValue({
+      conversation: makeConversation("draft_ready"),
+      itemDraft: makeItemDraft(
+        { category: "clothing", brand: "nike", condition: "good", size: "M" },
+        [],
+      ),
+      messages: [makeMessage("assistant", "Your listing draft is ready for review.")],
+      listingDraft: makeListingDraft({ title: "Nike Jacket, Size M", suggestedPrice: 40 }),
+    });
+    vi.mocked(updateListing).mockResolvedValue({
+      conversation: makeConversation("draft_ready"),
+      itemDraft: makeItemDraft(
+        { category: "clothing", brand: "nike", condition: "good", size: "M" },
+        [],
+      ),
+      messages: [makeMessage("assistant", "Your listing draft is ready for review.")],
+      listingDraft: makeListingDraft({ title: "Edited Jacket", suggestedPrice: 55 }),
+    });
+
+    const user = userEvent.setup();
+    await renderAndWaitForInit();
+
+    await user.type(screen.getByRole("textbox", { name: /message/i }), "It's a Nike jacket");
+    await user.click(screen.getByRole("button", { name: /send message/i }));
+    expect(await screen.findByText("Nike Jacket, Size M")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^edit$/i }));
+    await user.clear(screen.getByLabelText(/title/i));
+    await user.type(screen.getByLabelText(/title/i), "Edited Jacket");
+    await user.clear(screen.getByLabelText(/suggested price/i));
+    await user.type(screen.getByLabelText(/suggested price/i), "55");
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() =>
+      expect(updateListing).toHaveBeenCalledWith(
+        "conv-1",
+        expect.objectContaining({ title: "Edited Jacket", suggestedPrice: 55 }),
+      ),
+    );
+    expect(await screen.findByText("Edited Jacket")).toBeInTheDocument();
+    expect(screen.getByText("CA$55.00")).toBeInTheDocument();
+  });
+
+  it("approves a listing and locks the approved state", async () => {
+    vi.mocked(createConversation).mockResolvedValue({
+      conversationId: "conv-1",
+      state: "collecting",
+      itemDraft: makeItemDraft(),
+    });
+    vi.mocked(sendMessage).mockResolvedValue({
+      conversation: makeConversation("draft_ready"),
+      itemDraft: makeItemDraft(
+        { category: "clothing", brand: "nike", condition: "good", size: "M" },
+        [],
+      ),
+      assistantMessage: makeMessage("assistant", "Your listing draft is ready for review."),
+      listingDraft: makeListingDraft(),
+    });
+    vi.mocked(getConversation).mockResolvedValue({
+      conversation: makeConversation("draft_ready"),
+      itemDraft: makeItemDraft(
+        { category: "clothing", brand: "nike", condition: "good", size: "M" },
+        [],
+      ),
+      messages: [makeMessage("assistant", "Your listing draft is ready for review.")],
+      listingDraft: makeListingDraft({ title: "Nike Jacket, Size M", suggestedPrice: 40 }),
+    });
+    vi.mocked(approveListing).mockResolvedValue({
+      conversation: makeConversation("approved"),
+      itemDraft: makeItemDraft(
+        { category: "clothing", brand: "nike", condition: "good", size: "M" },
+        [],
+      ),
+      messages: [makeMessage("assistant", "Your listing draft is ready for review.")],
+      listingDraft: makeListingDraft({
+        title: "Nike Jacket, Size M",
+        suggestedPrice: 40,
+        status: "approved",
+      }),
+    });
+
+    const user = userEvent.setup();
+    await renderAndWaitForInit();
+
+    await user.type(screen.getByRole("textbox", { name: /message/i }), "It's a Nike jacket");
+    await user.click(screen.getByRole("button", { name: /send message/i }));
+    await user.click(await screen.findByRole("button", { name: /approve listing/i }));
+
+    await waitFor(() => expect(approveListing).toHaveBeenCalledWith("conv-1"));
+    expect(await screen.findByText("Listing approved")).toBeInTheDocument();
+    expect(screen.getByText("Your final draft has been saved.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /message/i })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: /^edit$/i })).not.toBeInTheDocument();
   });
 
   it("switches the mobile workspace tab between conversation and listing", async () => {

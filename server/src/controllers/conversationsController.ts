@@ -1,12 +1,17 @@
 import type { Request, Response } from "express";
 import { isValidObjectId } from "mongoose";
-import { CreateConversationRequestSchema, PostMessageRequestSchema } from "@seller/shared";
+import {
+  CreateConversationRequestSchema,
+  PostMessageRequestSchema,
+  UpdateListingRequestSchema,
+} from "@seller/shared";
 import * as conversationService from "../services/conversationService.js";
 import {
   serializeConversation,
   serializeItemDraft,
   serializeMessage,
   serializeListingDraft,
+  serializeConversationDetail,
 } from "./serializers.js";
 
 export async function createConversation(req: Request, res: Response): Promise<void> {
@@ -41,12 +46,7 @@ export async function getConversation(req: Request, res: Response): Promise<void
   }
 
   const { conversation, itemDraft, messages, listingDraft } = result;
-  res.json({
-    conversation: serializeConversation(conversation),
-    itemDraft: itemDraft ? serializeItemDraft(itemDraft) : null,
-    messages: messages.map(serializeMessage),
-    listingDraft: listingDraft ? serializeListingDraft(listingDraft) : null,
-  });
+  res.json(serializeConversationDetail({ conversation, itemDraft, messages, listingDraft }));
 }
 
 export async function postMessage(req: Request, res: Response): Promise<void> {
@@ -117,4 +117,73 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
       });
       return;
   }
+}
+
+function sendListingMutationResult(
+  res: Response,
+  result: conversationService.ListingMutationResult,
+  action: "approve" | "update",
+): void {
+  switch (result.kind) {
+    case "ok":
+      res.json(serializeConversationDetail(result.detail));
+      return;
+    case "not_found":
+      res.status(404).json({ error: "Conversation not found" });
+      return;
+    case "listing_not_found":
+      res.status(404).json({ error: "Listing not found" });
+      return;
+    case "invalid_state":
+      res.status(409).json({
+        error:
+          action === "approve"
+            ? `Listing can only be approved while conversation is in state "draft_ready"; current state is "${result.conversation.state}".`
+            : `Listing can only be edited while conversation is in state "draft_ready"; current state is "${result.conversation.state}".`,
+      });
+      return;
+    case "not_editable":
+      res.status(409).json({
+        error: `Listing is not editable while its status is "${result.listingDraft.status}".`,
+      });
+      return;
+    case "invalid_transition":
+      res.status(409).json({ error: result.error.message });
+      return;
+    case "inconsistent_state":
+      res.status(409).json({
+        error:
+          "Listing and conversation states are inconsistent. Please retry approval before continuing.",
+        conversation: serializeConversationDetail(result.detail),
+      });
+      return;
+  }
+}
+
+export async function updateListing(req: Request, res: Response): Promise<void> {
+  const conversationId = req.params.id;
+  if (!conversationId || !isValidObjectId(conversationId)) {
+    res.status(404).json({ error: "Conversation not found" });
+    return;
+  }
+
+  const parsed = UpdateListingRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  const result = await conversationService.updateListing(conversationId, parsed.data);
+  sendListingMutationResult(res, result, "update");
+}
+
+export async function approveListing(req: Request, res: Response): Promise<void> {
+  const conversationId = req.params.id;
+  if (!conversationId || !isValidObjectId(conversationId)) {
+    res.status(404).json({ error: "Conversation not found" });
+    return;
+  }
+
+  const result = await conversationService.approveListing(conversationId);
+  sendListingMutationResult(res, result, "approve");
 }

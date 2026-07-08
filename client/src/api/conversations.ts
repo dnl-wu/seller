@@ -4,9 +4,11 @@ import {
   GetConversationResponseSchema,
   PostMessageRequestSchema,
   PostMessageResponseSchema,
+  UpdateListingRequestSchema,
   type CreateConversationResponse,
   type GetConversationResponse,
   type PostMessageResponse,
+  type UpdateListingRequest,
 } from "@seller/shared";
 import type { ZodType } from "zod";
 
@@ -108,5 +110,25 @@ export function sendMessage(
     `/api/conversations/${conversationId}/messages`,
     { method: "POST", body: JSON.stringify(payload) },
     PostMessageResponseSchema,
+  );
+}
+
+export function updateListing(
+  conversationId: string,
+  input: UpdateListingRequest,
+): Promise<GetConversationResponse> {
+  const payload = UpdateListingRequestSchema.parse(input);
+  return request(
+    `/api/conversations/${conversationId}/listing`,
+    { method: "PATCH", body: JSON.stringify(payload) },
+    GetConversationResponseSchema,
+  );
+}
+
+export function approveListing(conversationId: string): Promise<GetConversationResponse> {
+  return request(
+    `/api/conversations/${conversationId}/listing/approve`,
+    { method: "POST" },
+    GetConversationResponseSchema,
   );
 }

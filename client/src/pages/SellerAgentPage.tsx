@@ -33,11 +33,15 @@ export function SellerAgentPage() {
     conversation,
     isInitializing,
     isSending,
+    isApprovingListing,
+    isUpdatingListing,
     error,
     changedFields,
+    approveListing,
     sendMessage,
     startNewListing,
     dismissError,
+    updateListing,
   } = useConversation(sellerId);
 
   const [inputValue, setInputValue] = useState("");
@@ -119,7 +123,12 @@ export function SellerAgentPage() {
               />
               <ListingPreview
                 listingDraft={conversation.listingDraft}
+                conversationState={conversation.state}
                 isGenerating={conversation.state === "generating"}
+                isApproving={isApprovingListing}
+                isUpdating={isUpdatingListing}
+                onApproveListing={approveListing}
+                onUpdateListing={updateListing}
               />
             </>
           )}

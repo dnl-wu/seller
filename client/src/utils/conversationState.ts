@@ -51,8 +51,8 @@ export function isSellerRole(role: MessageRole): boolean {
 
 /**
  * Text for the transient "thinking" indicator while a request is in flight.
- * Based on real backend data (current state, remaining missing fields) —
- * never a fabricated multi-step progress simulation.
+ * Based on real backend data (current state, remaining missing fields), never
+ * a fabricated multi-step progress simulation.
  */
 export function getThinkingLabel(
   state: ConversationState,
@@ -68,7 +68,17 @@ export interface UiError {
   retryable: boolean;
 }
 
-export type ErrorContext = "create" | "send" | "load";
+export type ErrorContext = "approve" | "create" | "listing" | "send" | "load";
+
+function conflictMessage(context: ErrorContext): string {
+  if (context === "approve") {
+    return "This listing cannot be approved from its current state.";
+  }
+  if (context === "listing") {
+    return "This listing can no longer be edited.";
+  }
+  return "This listing draft is ready, so the conversation is currently locked.";
+}
 
 /** Maps technical/API errors onto the user-facing copy shown in the UI. */
 export function toUiError(err: unknown, context: ErrorContext): UiError {
@@ -87,7 +97,7 @@ export function toUiError(err: unknown, context: ErrorContext): UiError {
     }
     if (err.status === 409) {
       return {
-        message: "This listing draft is ready, so the conversation is currently locked.",
+        message: conflictMessage(context),
         retryable: false,
       };
     }
@@ -112,7 +122,19 @@ export function toUiError(err: unknown, context: ErrorContext): UiError {
 
   if (context === "send") {
     return {
-      message: "We couldn't send your message. Your text has been preserved—try again.",
+      message: "We couldn't send your message. Your text has been preserved - try again.",
+      retryable: true,
+    };
+  }
+  if (context === "listing") {
+    return {
+      message: "We couldn't save your listing changes. Your edits have been preserved.",
+      retryable: true,
+    };
+  }
+  if (context === "approve") {
+    return {
+      message: "We couldn't approve this listing. Please try again.",
       retryable: true,
     };
   }

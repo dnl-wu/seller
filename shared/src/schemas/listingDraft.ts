@@ -20,6 +20,14 @@ export const GeneratedListingSchema = z.object({
 });
 export type GeneratedListing = z.infer<typeof GeneratedListingSchema>;
 
+export const UpdateListingRequestSchema = z.object({
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  suggestedPrice: z.number().finite().nonnegative(),
+  currency: CurrencySchema,
+});
+export type UpdateListingRequest = z.infer<typeof UpdateListingRequestSchema>;
+
 export const ListingDraftSchema = z.object({
   id: z.string().min(1),
   conversationId: z.string().min(1),

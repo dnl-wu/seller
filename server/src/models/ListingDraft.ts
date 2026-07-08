@@ -4,6 +4,7 @@ import {
   CURRENCY_CODES,
   type ListingDraftStatus,
   type Currency,
+  type UpdateListingRequest,
 } from "@seller/shared";
 
 export interface ListingDraftAttrs {
@@ -69,5 +70,28 @@ export async function findListingDraftByConversation(
   conversationId: string,
 ): Promise<ListingDraftDocument | null> {
   const doc = await ListingDraftModel.findOne({ conversationId });
+  return doc as ListingDraftDocument | null;
+}
+
+export async function updateGeneratedListingDraft(
+  conversationId: string,
+  input: UpdateListingRequest,
+): Promise<ListingDraftDocument | null> {
+  const doc = await ListingDraftModel.findOneAndUpdate(
+    { conversationId, status: "generated" },
+    { $set: input },
+    { new: true, runValidators: true },
+  );
+  return doc as ListingDraftDocument | null;
+}
+
+export async function approveGeneratedListingDraft(
+  conversationId: string,
+): Promise<ListingDraftDocument | null> {
+  const doc = await ListingDraftModel.findOneAndUpdate(
+    { conversationId, status: "generated" },
+    { $set: { status: "approved" } },
+    { new: true, runValidators: true },
+  );
   return doc as ListingDraftDocument | null;
 }

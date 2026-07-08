@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { GeneratedListingSchema, ItemAttributesSchema } from "@seller/shared";
+import {
+  GeneratedListingSchema,
+  ItemAttributesSchema,
+  type UpdateListingRequest,
+} from "@seller/shared";
 import {
   createConversation as createConversationRecord,
   findConversationById,
+  transitionConversationState,
   updateConversationState,
   type ConversationDocument,
 } from "../models/Conversation.js";
@@ -21,8 +26,10 @@ import {
   type ItemDraftDocument,
 } from "../models/ItemDraft.js";
 import {
+  approveGeneratedListingDraft,
   createListingDraft,
   findListingDraftByConversation,
+  updateGeneratedListingDraft,
   type ListingDraftDocument,
 } from "../models/ListingDraft.js";
 import {
@@ -83,6 +90,150 @@ export async function getConversationById(
   ]);
 
   return { conversation, itemDraft, messages, listingDraft };
+}
+
+async function getRequiredConversationDetail(
+  conversationId: string,
+): Promise<ConversationDetail> {
+  const detail = await getConversationById(conversationId);
+  if (!detail) {
+    throw new Error(`Conversation missing after update: ${conversationId}`);
+  }
+  return detail;
+}
+
+export type ListingMutationResult =
+  | { kind: "ok"; detail: ConversationDetail }
+  | { kind: "not_found" }
+  | { kind: "listing_not_found"; conversation: ConversationDocument }
+  | { kind: "invalid_state"; conversation: ConversationDocument }
+  | {
+      kind: "not_editable";
+      conversation: ConversationDocument;
+      listingDraft: ListingDraftDocument;
+    }
+  | { kind: "invalid_transition"; conversation: ConversationDocument; error: Error }
+  | { kind: "inconsistent_state"; detail: ConversationDetail };
+
+export async function updateListing(
+  conversationId: string,
+  input: UpdateListingRequest,
+): Promise<ListingMutationResult> {
+  const conversation = await findConversationById(conversationId);
+  if (!conversation) return { kind: "not_found" };
+
+  const listingDraft = await findListingDraftByConversation(conversationId);
+  if (!listingDraft) return { kind: "listing_not_found", conversation };
+
+  if (conversation.state !== "draft_ready") {
+    return { kind: "invalid_state", conversation };
+  }
+
+  if (listingDraft.status !== "generated") {
+    return { kind: "not_editable", conversation, listingDraft };
+  }
+
+  const updatedListingDraft = await updateGeneratedListingDraft(conversationId, input);
+  if (!updatedListingDraft) {
+    const latestListingDraft = await findListingDraftByConversation(conversationId);
+    if (!latestListingDraft) return { kind: "listing_not_found", conversation };
+    return { kind: "not_editable", conversation, listingDraft: latestListingDraft };
+  }
+
+  return {
+    kind: "ok",
+    detail: await getRequiredConversationDetail(conversationId),
+  };
+}
+
+async function approveDraftReadyConversation(
+  conversationId: string,
+): Promise<ListingMutationResult> {
+  const approvedConversation = await transitionConversationState(
+    conversationId,
+    "draft_ready",
+    "approved",
+  );
+
+  if (approvedConversation) {
+    return {
+      kind: "ok",
+      detail: await getRequiredConversationDetail(conversationId),
+    };
+  }
+
+  const detail = await getRequiredConversationDetail(conversationId);
+  if (detail.conversation.state === "approved" && detail.listingDraft?.status === "approved") {
+    return { kind: "ok", detail };
+  }
+
+  if (detail.conversation.state === "draft_ready" && detail.listingDraft?.status === "approved") {
+    const repairedConversation = await transitionConversationState(
+      conversationId,
+      "draft_ready",
+      "approved",
+    );
+    if (repairedConversation) {
+      return {
+        kind: "ok",
+        detail: await getRequiredConversationDetail(conversationId),
+      };
+    }
+  }
+
+  return { kind: "inconsistent_state", detail };
+}
+
+export async function approveListing(
+  conversationId: string,
+): Promise<ListingMutationResult> {
+  const conversation = await findConversationById(conversationId);
+  if (!conversation) return { kind: "not_found" };
+
+  const listingDraft = await findListingDraftByConversation(conversationId);
+  if (!listingDraft) return { kind: "listing_not_found", conversation };
+
+  if (conversation.state === "approved" && listingDraft.status === "approved") {
+    return {
+      kind: "ok",
+      detail: await getRequiredConversationDetail(conversationId),
+    };
+  }
+
+  if (conversation.state !== "draft_ready") {
+    return { kind: "invalid_state", conversation };
+  }
+
+  try {
+    assertTransition(conversation.state, "approved");
+  } catch (err) {
+    return {
+      kind: "invalid_transition",
+      conversation,
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
+  }
+
+  if (listingDraft.status === "approved") {
+    return approveDraftReadyConversation(conversationId);
+  }
+
+  // Approval spans ListingDraft and Conversation. This app currently keeps
+  // model helpers simple rather than opening request-level Mongo sessions,
+  // so the safest conventional ordering is to approve the listing first
+  // (blocking later edits), then transition the conversation with a state
+  // guard. If the second write fails, the next approval request repairs the
+  // only expected partial state: listing approved, conversation draft_ready.
+  const approvedListingDraft = await approveGeneratedListingDraft(conversationId);
+  if (!approvedListingDraft) {
+    const latestListingDraft = await findListingDraftByConversation(conversationId);
+    if (!latestListingDraft) return { kind: "listing_not_found", conversation };
+    if (latestListingDraft.status !== "approved") {
+      return { kind: "not_editable", conversation, listingDraft: latestListingDraft };
+    }
+  }
+
+  return approveDraftReadyConversation(conversationId);
 }
 
 export type ExtractionFailureReason = "provider_error" | "invalid_response" | "schema_invalid";

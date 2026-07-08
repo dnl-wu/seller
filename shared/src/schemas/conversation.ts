@@ -46,3 +46,9 @@ export const PostMessageResponseSchema = z.object({
   listingDraft: ListingDraftSchema.nullable(),
 });
 export type PostMessageResponse = z.infer<typeof PostMessageResponseSchema>;
+
+export const UpdateListingResponseSchema = GetConversationResponseSchema;
+export type UpdateListingResponse = GetConversationResponse;
+
+export const ApproveListingResponseSchema = GetConversationResponseSchema;
+export type ApproveListingResponse = GetConversationResponse;

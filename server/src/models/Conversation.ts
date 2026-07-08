@@ -60,3 +60,16 @@ export async function updateConversationState(
   const saved = await conversation.save();
   return saved as ConversationDocument;
 }
+
+export async function transitionConversationState(
+  id: string,
+  from: ConversationState,
+  to: ConversationState,
+): Promise<ConversationDocument | null> {
+  const doc = await ConversationModel.findOneAndUpdate(
+    { _id: id, state: from },
+    { $set: { state: to } },
+    { new: true, runValidators: true },
+  );
+  return doc as ConversationDocument | null;
+}

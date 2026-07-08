@@ -7,6 +7,7 @@ import type { ListingGenerator } from "../listing/types.js";
 vi.mock("../models/Conversation.js", () => ({
   createConversation: vi.fn(),
   findConversationById: vi.fn(),
+  transitionConversationState: vi.fn(),
   updateConversationState: vi.fn(),
 }));
 vi.mock("../models/Message.js", () => ({
@@ -22,13 +23,16 @@ vi.mock("../models/ItemDraft.js", () => ({
   updateItemDraft: vi.fn(),
 }));
 vi.mock("../models/ListingDraft.js", () => ({
+  approveGeneratedListingDraft: vi.fn(),
   createListingDraft: vi.fn(),
   findListingDraftByConversation: vi.fn(),
+  updateGeneratedListingDraft: vi.fn(),
 }));
 
 import {
   createConversation as createConversationDoc,
   findConversationById,
+  transitionConversationState,
   updateConversationState,
 } from "../models/Conversation.js";
 import {
@@ -43,11 +47,18 @@ import {
   findItemDraftByConversation,
   updateItemDraft,
 } from "../models/ItemDraft.js";
-import { createListingDraft, findListingDraftByConversation } from "../models/ListingDraft.js";
 import {
+  approveGeneratedListingDraft,
+  createListingDraft,
+  findListingDraftByConversation,
+  updateGeneratedListingDraft,
+} from "../models/ListingDraft.js";
+import {
+  approveListing,
   createConversation,
   getConversationById,
   postSellerMessage,
+  updateListing,
 } from "./conversationService.js";
 
 function makeConversationDoc(overrides: {
@@ -110,6 +121,7 @@ function makeListingDraftDoc(overrides: {
   description?: string;
   suggestedPrice?: number;
   currency?: "CAD" | "USD";
+  status?: "generated" | "approved";
 } = {}) {
   const doc = {
     _id: { toString: () => overrides.id ?? "listing1" },
@@ -119,7 +131,7 @@ function makeListingDraftDoc(overrides: {
     description: overrides.description ?? "A Nike jacket in good condition.",
     suggestedPrice: overrides.suggestedPrice ?? 40,
     currency: overrides.currency ?? "CAD",
-    status: "generated" as const,
+    status: overrides.status ?? "generated",
     createdAt: new Date("2024-01-01T00:00:00.000Z"),
     updatedAt: new Date("2024-01-01T00:00:00.000Z"),
   };
@@ -158,6 +170,15 @@ beforeEach(() => {
   );
   vi.mocked(createListingDraft).mockImplementation(async (conversationId, itemDraftId, listing) =>
     makeListingDraftDoc({ conversationId, itemDraftId, ...listing })!,
+  );
+  vi.mocked(updateGeneratedListingDraft).mockImplementation(async (conversationId, input) =>
+    makeListingDraftDoc({ conversationId, ...input })!,
+  );
+  vi.mocked(approveGeneratedListingDraft).mockImplementation(async (conversationId) =>
+    makeListingDraftDoc({ conversationId, status: "approved" })!,
+  );
+  vi.mocked(transitionConversationState).mockImplementation(async (id, _from, state) =>
+    makeConversationDoc({ id, state }),
   );
 });
 
@@ -222,6 +243,167 @@ describe("getConversationById", () => {
     const result = await getConversationById("conv1");
 
     expect(result?.listingDraft).toBe(listingDraftDoc);
+  });
+});
+
+describe("updateListing", () => {
+  it("persists seller edits to the listing without mutating item facts", async () => {
+    const conversationDoc = makeConversationDoc({ state: "draft_ready" });
+    const itemDraftDoc = makeItemDraftDoc({
+      attributes: { category: "clothing", brand: "nike", condition: "good", size: "M" },
+      missingFields: [],
+    });
+    const listingDraftDoc = makeListingDraftDoc();
+    const updatedListingDraftDoc = makeListingDraftDoc({
+      title: "Nike Jacket, Size M",
+      description: "Updated listing copy.",
+      suggestedPrice: 45,
+      currency: "USD",
+    });
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+    vi.mocked(findMessagesByConversation).mockResolvedValue([] as never);
+    vi.mocked(findListingDraftByConversation)
+      .mockResolvedValueOnce(listingDraftDoc!)
+      .mockResolvedValueOnce(updatedListingDraftDoc!);
+
+    const result = await updateListing("conv1", {
+      title: "Nike Jacket, Size M",
+      description: "Updated listing copy.",
+      suggestedPrice: 45,
+      currency: "USD",
+    });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok result");
+    expect(updateGeneratedListingDraft).toHaveBeenCalledWith("conv1", {
+      title: "Nike Jacket, Size M",
+      description: "Updated listing copy.",
+      suggestedPrice: 45,
+      currency: "USD",
+    });
+    expect(updateItemDraft).not.toHaveBeenCalled();
+    expect(result.detail.itemDraft?.attributes.brand).toBe("nike");
+    expect(result.detail.listingDraft?.title).toBe("Nike Jacket, Size M");
+  });
+
+  it("rejects edits when the conversation is not draft_ready", async () => {
+    const conversationDoc = makeConversationDoc({ state: "approved" });
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(
+      makeListingDraftDoc({ status: "approved" })!,
+    );
+
+    const result = await updateListing("conv1", {
+      title: "Final listing",
+      description: "Final copy.",
+      suggestedPrice: 45,
+      currency: "CAD",
+    });
+
+    expect(result.kind).toBe("invalid_state");
+    expect(updateGeneratedListingDraft).not.toHaveBeenCalled();
+  });
+
+  it("rejects edits once the listing is approved", async () => {
+    const conversationDoc = makeConversationDoc({ state: "draft_ready" });
+    const listingDraftDoc = makeListingDraftDoc({ status: "approved" });
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(listingDraftDoc!);
+
+    const result = await updateListing("conv1", {
+      title: "Final listing",
+      description: "Final copy.",
+      suggestedPrice: 45,
+      currency: "CAD",
+    });
+
+    expect(result.kind).toBe("not_editable");
+    expect(updateGeneratedListingDraft).not.toHaveBeenCalled();
+  });
+});
+
+describe("approveListing", () => {
+  it("marks the listing approved and transitions the conversation to approved", async () => {
+    const draftReadyConversation = makeConversationDoc({ state: "draft_ready" });
+    const approvedConversation = makeConversationDoc({ state: "approved" });
+    const itemDraftDoc = makeItemDraftDoc({ missingFields: [] });
+    const generatedListing = makeListingDraftDoc();
+    const approvedListing = makeListingDraftDoc({ status: "approved" });
+
+    vi.mocked(findConversationById)
+      .mockResolvedValueOnce(draftReadyConversation)
+      .mockResolvedValueOnce(approvedConversation);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+    vi.mocked(findMessagesByConversation).mockResolvedValue([] as never);
+    vi.mocked(findListingDraftByConversation)
+      .mockResolvedValueOnce(generatedListing!)
+      .mockResolvedValueOnce(approvedListing!);
+
+    const result = await approveListing("conv1");
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok result");
+    expect(approveGeneratedListingDraft).toHaveBeenCalledWith("conv1");
+    expect(transitionConversationState).toHaveBeenCalledWith(
+      "conv1",
+      "draft_ready",
+      "approved",
+    );
+    expect(result.detail.conversation.state).toBe("approved");
+    expect(result.detail.listingDraft?.status).toBe("approved");
+  });
+
+  it("is idempotent when the conversation and listing are already approved", async () => {
+    const approvedConversation = makeConversationDoc({ state: "approved" });
+    const approvedListing = makeListingDraftDoc({ status: "approved" });
+
+    vi.mocked(findConversationById).mockResolvedValue(approvedConversation);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(makeItemDraftDoc({ missingFields: [] })!);
+    vi.mocked(findMessagesByConversation).mockResolvedValue([] as never);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(approvedListing!);
+
+    const result = await approveListing("conv1");
+
+    expect(result.kind).toBe("ok");
+    expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
+    expect(transitionConversationState).not.toHaveBeenCalled();
+  });
+
+  it("repairs the expected partial approval state", async () => {
+    const draftReadyConversation = makeConversationDoc({ state: "draft_ready" });
+    const approvedConversation = makeConversationDoc({ state: "approved" });
+    const approvedListing = makeListingDraftDoc({ status: "approved" });
+
+    vi.mocked(findConversationById)
+      .mockResolvedValueOnce(draftReadyConversation)
+      .mockResolvedValueOnce(approvedConversation);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(makeItemDraftDoc({ missingFields: [] })!);
+    vi.mocked(findMessagesByConversation).mockResolvedValue([] as never);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(approvedListing!);
+
+    const result = await approveListing("conv1");
+
+    expect(result.kind).toBe("ok");
+    expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
+    expect(transitionConversationState).toHaveBeenCalledWith(
+      "conv1",
+      "draft_ready",
+      "approved",
+    );
+  });
+
+  it("rejects approval before draft_ready", async () => {
+    const conversationDoc = makeConversationDoc({ state: "collecting" });
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(makeListingDraftDoc()!);
+
+    const result = await approveListing("conv1");
+
+    expect(result.kind).toBe("invalid_state");
+    expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
+    expect(transitionConversationState).not.toHaveBeenCalled();
   });
 });
 
