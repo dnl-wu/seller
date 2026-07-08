@@ -7,7 +7,16 @@ function fakeProvider(complete: LlmProvider["complete"]): LlmProvider {
   return { complete };
 }
 
-const baseInput = { attributes: { category: "clothing", brand: "nike" }, currency: "CAD" as const };
+const baseInput = {
+  attributes: { category: "clothing", brand: "nike" },
+  preferences: {
+    toneOfVoice: "professional",
+    descriptionLength: "short",
+    pricingStrategy: "sell_fast",
+    defaultCurrency: "CAD",
+    shippingPreference: "Local pickup preferred.",
+  },
+} as const;
 
 describe("LlmListingGenerator", () => {
   it("returns a parsed listing for a valid JSON response", async () => {
@@ -31,6 +40,30 @@ describe("LlmListingGenerator", () => {
     });
   });
 
+  it("passes structured preferences into the provider prompt without seller identity", async () => {
+    let userPrompt = "";
+    const provider = fakeProvider(async (input) => {
+      userPrompt = input.user;
+      return JSON.stringify({
+        title: "Nike Jacket",
+        description: "A Nike jacket.",
+        suggestedPrice: 40,
+        currency: "CAD",
+      });
+    });
+    const generator = new LlmListingGenerator(provider);
+
+    await generator.generate(baseInput);
+
+    expect(userPrompt).toContain("Tone of voice: professional");
+    expect(userPrompt).toContain("Description length: short");
+    expect(userPrompt).toContain("Pricing strategy: sell_fast");
+    expect(userPrompt).toContain("Requested currency: CAD");
+    expect(userPrompt).toContain("Local pickup preferred.");
+    expect(userPrompt).not.toContain("seller-1");
+    expect(userPrompt).not.toContain("previous conversation");
+  });
+
   it("throws ListingGenerationValidationError for invalid JSON", async () => {
     const provider = fakeProvider(async () => "not json{{{");
     const generator = new LlmListingGenerator(provider);
@@ -38,19 +71,38 @@ describe("LlmListingGenerator", () => {
     await expect(generator.generate(baseInput)).rejects.toThrow(ListingGenerationValidationError);
   });
 
-  it("throws ListingGenerationProviderError for an empty response", async () => {
+  it("throws ListingGenerationValidationError for schema-invalid JSON", async () => {
+    const provider = fakeProvider(async () =>
+      JSON.stringify({
+        title: "Nike Jacket",
+        description: "A Nike jacket.",
+        suggestedPrice: Number.NaN,
+        currency: "EUR",
+      }),
+    );
+    const generator = new LlmListingGenerator(provider);
+
+    await expect(generator.generate(baseInput)).rejects.toThrow(ListingGenerationValidationError);
+  });
+
+  it("throws ListingGenerationValidationError for an empty response", async () => {
     const provider = fakeProvider(async () => "");
     const generator = new LlmListingGenerator(provider);
 
-    await expect(generator.generate(baseInput)).rejects.toThrow(ListingGenerationProviderError);
+    await expect(generator.generate(baseInput)).rejects.toThrow(ListingGenerationValidationError);
   });
 
   it("throws ListingGenerationProviderError when the provider rejects", async () => {
     const provider = fakeProvider(async () => {
-      throw new Error("network error");
+      const err = new Error("too many requests");
+      Object.assign(err, { status: 429 });
+      throw err;
     });
     const generator = new LlmListingGenerator(provider);
 
+    await expect(generator.generate(baseInput)).rejects.toMatchObject({
+      code: "AI_RATE_LIMITED",
+    });
     await expect(generator.generate(baseInput)).rejects.toThrow(ListingGenerationProviderError);
   });
 });

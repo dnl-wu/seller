@@ -1,50 +1,35 @@
-import type { GeneratedListing } from "@seller/shared";
-import type { ListingGenerationInput, ListingGenerator } from "./types.js";
+import { GeneratedListingSchema, type GeneratedListing } from "@seller/shared";
+import type { ListingGenerationContext } from "../services/context/context.types.js";
+import { classifyAiProviderError } from "../ai/errors.js";
+import type { ListingGenerator } from "./types.js";
 import type { LlmProvider } from "../extraction/llmProvider.js";
 import { ListingGenerationProviderError, ListingGenerationValidationError } from "./errors.js";
+import { buildListingPrompt } from "./prompts.js";
 
-function buildSystemPrompt(): string {
-  return [
-    "You write a resale marketplace listing from structured item attributes only.",
-    "Only state facts present in the provided attributes — never invent specifications, materials, or features.",
-    "If defects are listed, clearly disclose them in the description.",
-    'Do not claim the item "works perfectly", is "flawless", or is in perfect condition unless the condition attribute is "new".',
-    "Respond with a single JSON object with exactly these fields: title, description, suggestedPrice, currency.",
-  ].join(" ");
-}
-
-function buildUserPrompt({ attributes, currency }: ListingGenerationInput): string {
-  return [
-    `Currency: ${currency}`,
-    "Structured item attributes (the only source of truth for this listing):",
-    JSON.stringify(attributes),
-  ].join("\n");
-}
+const StrictGeneratedListingSchema = GeneratedListingSchema.strict();
 
 /**
- * Real, AI-backed ListingGenerator. As with LlmItemAttributeExtractor, this
- * is only responsible for getting a usable JSON object out of the
- * provider — schema and claims validation happen uniformly in the service
- * layer for every generator implementation, not here.
+ * Real, AI-backed ListingGenerator. It receives only an assembled listing
+ * context, parses and validates provider JSON, then returns schema-valid
+ * listing content for the deterministic workflow to claims-check and persist.
  */
 export class LlmListingGenerator implements ListingGenerator {
   constructor(private readonly provider: LlmProvider) {}
 
-  async generate(input: ListingGenerationInput): Promise<GeneratedListing> {
+  async generate(context: ListingGenerationContext): Promise<GeneratedListing> {
     let raw: string;
     try {
-      raw = await this.provider.complete({
-        system: buildSystemPrompt(),
-        user: buildUserPrompt(input),
-      });
+      raw = await this.provider.complete(buildListingPrompt(context));
     } catch (err) {
-      throw new ListingGenerationProviderError("Listing generation provider request failed", {
-        cause: err,
-      });
+      throw new ListingGenerationProviderError(
+        "Listing generation provider request failed",
+        classifyAiProviderError(err),
+        { cause: err },
+      );
     }
 
     if (!raw || !raw.trim()) {
-      throw new ListingGenerationProviderError(
+      throw new ListingGenerationValidationError(
         "Listing generation provider returned an empty response",
       );
     }
@@ -55,16 +40,18 @@ export class LlmListingGenerator implements ListingGenerator {
     } catch (err) {
       throw new ListingGenerationValidationError(
         "Listing generation response was not valid JSON",
+        "AI_INVALID_RESPONSE",
         { cause: err },
       );
     }
 
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    const result = StrictGeneratedListingSchema.safeParse(parsed);
+    if (!result.success) {
       throw new ListingGenerationValidationError(
-        "Listing generation response was not a JSON object",
+        "Listing generation response failed schema validation",
       );
     }
 
-    return parsed as GeneratedListing;
+    return result.data;
   }
 }

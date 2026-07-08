@@ -28,6 +28,9 @@ vi.mock("../models/ListingDraft.js", () => ({
   findListingDraftByConversation: vi.fn(),
   updateGeneratedListingDraft: vi.fn(),
 }));
+vi.mock("./sellerPreferenceService.js", () => ({
+  getSellerPreferences: vi.fn(),
+}));
 
 import {
   createConversation as createConversationDoc,
@@ -60,6 +63,7 @@ import {
   postSellerMessage,
   updateListing,
 } from "./conversationService.js";
+import { getSellerPreferences } from "./sellerPreferenceService.js";
 
 function makeConversationDoc(overrides: {
   id?: string;
@@ -153,6 +157,14 @@ const VALID_GENERATED_LISTING: GeneratedListing = {
   currency: "CAD",
 };
 
+const DEFAULT_TEST_PREFERENCES = {
+  sellerId: "demo-seller",
+  toneOfVoice: "concise",
+  descriptionLength: "medium",
+  pricingStrategy: "balanced",
+  defaultCurrency: "CAD",
+} as const;
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(findRecentMessages).mockResolvedValue([]);
@@ -171,6 +183,7 @@ beforeEach(() => {
   vi.mocked(createListingDraft).mockImplementation(async (conversationId, itemDraftId, listing) =>
     makeListingDraftDoc({ conversationId, itemDraftId, ...listing })!,
   );
+  vi.mocked(getSellerPreferences).mockResolvedValue(DEFAULT_TEST_PREFERENCES);
   vi.mocked(updateGeneratedListingDraft).mockImplementation(async (conversationId, input) =>
     makeListingDraftDoc({ conversationId, ...input })!,
   );
@@ -459,7 +472,8 @@ describe("postSellerMessage", () => {
     );
 
     const extractor = fakeExtractor(async () => ({ brand: "nike" }));
-    const listingGenerator = fakeListingGenerator(async () => VALID_GENERATED_LISTING);
+    const generate = vi.fn(async () => VALID_GENERATED_LISTING);
+    const listingGenerator = fakeListingGenerator(generate);
 
     const result = await postSellerMessage(
       "conv1",
@@ -482,6 +496,16 @@ describe("postSellerMessage", () => {
       expect.objectContaining({ state: "generating" }),
       "draft_ready",
     );
+    expect(getSellerPreferences).toHaveBeenCalledWith("demo-seller");
+    expect(generate).toHaveBeenCalledWith({
+      attributes: { category: "clothing", condition: "good", size: "M", brand: "nike" },
+      preferences: {
+        toneOfVoice: "concise",
+        descriptionLength: "medium",
+        pricingStrategy: "balanced",
+        defaultCurrency: "CAD",
+      },
+    });
     expect(result.conversation.state).toBe("draft_ready");
     expect(result.listingDraft).not.toBeNull();
     expect(result.listingDraft?.title).toBe("Nike Jacket");
@@ -517,7 +541,7 @@ describe("postSellerMessage", () => {
 
     expect(result.kind).toBe("listing_generation_failed");
     if (result.kind !== "listing_generation_failed") throw new Error("expected failure result");
-    expect(result.reason).toBe("provider_error");
+    expect(result.reason).toBe("AI_UNKNOWN");
     expect(result.conversation.state).toBe("ready_to_generate");
     expect(createListingDraft).not.toHaveBeenCalled();
     expect(result.itemDraft.attributes.brand).toBe("nike");
@@ -562,7 +586,7 @@ describe("postSellerMessage", () => {
 
     expect(result.kind).toBe("listing_generation_failed");
     if (result.kind !== "listing_generation_failed") throw new Error("expected failure result");
-    expect(result.reason).toBe("invalid_output");
+    expect(result.reason).toBe("AI_INVALID_RESPONSE");
     expect(result.conversation.state).toBe("ready_to_generate");
     expect(createListingDraft).not.toHaveBeenCalled();
   });
@@ -679,12 +703,12 @@ describe("postSellerMessage", () => {
     vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
 
     const extractor = fakeExtractor(async () => {
-      throw new ExtractionProviderError("timed out");
+      throw new ExtractionProviderError("timed out", "AI_TIMEOUT");
     });
 
     const result = await postSellerMessage("conv1", "a jacket", "client-timeout", extractor);
 
-    expect(result).toMatchObject({ kind: "extraction_failed", reason: "provider_error" });
+    expect(result).toMatchObject({ kind: "extraction_failed", reason: "AI_TIMEOUT" });
     expect(createMessage).not.toHaveBeenCalled();
     expect(updateItemDraft).not.toHaveBeenCalled();
   });
@@ -703,7 +727,7 @@ describe("postSellerMessage", () => {
 
     const result = await postSellerMessage("conv1", "a jacket", "client-badjson", extractor);
 
-    expect(result).toMatchObject({ kind: "extraction_failed", reason: "invalid_response" });
+    expect(result).toMatchObject({ kind: "extraction_failed", reason: "AI_INVALID_RESPONSE" });
     expect(createMessage).not.toHaveBeenCalled();
   });
 
@@ -722,11 +746,11 @@ describe("postSellerMessage", () => {
 
     const result = await postSellerMessage("conv1", "a used jacket", "client-badenum", extractor);
 
-    expect(result).toMatchObject({ kind: "extraction_failed", reason: "schema_invalid" });
+    expect(result).toMatchObject({ kind: "extraction_failed", reason: "AI_INVALID_RESPONSE" });
     expect(createMessage).not.toHaveBeenCalled();
   });
 
-  it("strips unsupported invented fields while keeping valid ones", async () => {
+  it("rejects unsupported invented fields without persisting the seller message", async () => {
     const conversationDoc = makeConversationDoc();
     const itemDraftDoc = makeItemDraftDoc({ attributes: {}, missingFields: [
       "category",
@@ -746,10 +770,12 @@ describe("postSellerMessage", () => {
 
     const result = await postSellerMessage("conv1", "a jacket", "client-invented", extractor);
 
-    expect(result.kind).toBe("ok");
-    if (result.kind !== "ok") throw new Error("expected ok result");
-    expect(result.itemDraft.attributes).not.toHaveProperty("waterResistanceRating");
-    expect(result.itemDraft.attributes.category).toBe("clothing");
+    expect(result).toMatchObject({
+      kind: "extraction_failed",
+      reason: "AI_INVALID_RESPONSE",
+    });
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(updateItemDraft).not.toHaveBeenCalled();
   });
 
   it("returns the existing result for a duplicate clientMessageId without creating a new message or listing", async () => {

@@ -24,9 +24,26 @@ describe("mergeAttributes", () => {
     expect(mergeAttributes(current, patch)).toEqual(current);
   });
 
+  it("does not let empty-string patch values overwrite known attributes", () => {
+    const current: ItemAttributes = { category: "clothing", brand: "Sony" };
+    expect(mergeAttributes(current, { brand: "" })).toEqual(current);
+  });
+
   it("overwrites a known attribute when the patch provides a new non-null value", () => {
     const current: ItemAttributes = { size: "M" };
     expect(mergeAttributes(current, { size: "L" })).toEqual({ size: "L" });
+  });
+
+  it("applies explicit corrections to existing values", () => {
+    const current: ItemAttributes = { condition: "good" };
+    expect(mergeAttributes(current, { condition: "fair" })).toEqual({ condition: "fair" });
+  });
+
+  it("replaces arrays when the patch provides a new array", () => {
+    const current: ItemAttributes = { defects: ["small stain"] };
+    expect(mergeAttributes(current, { defects: ["missing button"] })).toEqual({
+      defects: ["missing button"],
+    });
   });
 
   it("leaves attributes not present in the patch untouched", () => {

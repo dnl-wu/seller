@@ -1,21 +1,30 @@
+import type { AiErrorCode } from "../ai/errors.js";
+
 /**
- * Thrown for provider-level failures: network errors, timeouts, temporary
- * outages, or an empty response.
+ * Provider-level failures: timeouts, rate limits, network outages, or other
+ * temporary provider problems.
  */
 export class ListingGenerationProviderError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  constructor(
+    message: string,
+    public readonly code: AiErrorCode = "AI_UNAVAILABLE",
+    options?: { cause?: unknown },
+  ) {
     super(message, options);
     this.name = "ListingGenerationProviderError";
   }
 }
 
 /**
- * Thrown when the provider responded, but the output could not be turned
- * into a usable object, failed schema validation, or made claims not
- * supported by the structured attributes it was given.
+ * The provider responded, but the output could not be turned into schema-valid
+ * listing data or made claims unsupported by the structured item facts.
  */
 export class ListingGenerationValidationError extends Error {
-  constructor(message: string, options?: { cause?: unknown }) {
+  constructor(
+    message: string,
+    public readonly code: AiErrorCode = "AI_INVALID_RESPONSE",
+    options?: { cause?: unknown },
+  ) {
     super(message, options);
     this.name = "ListingGenerationValidationError";
   }

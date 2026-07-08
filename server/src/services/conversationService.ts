@@ -4,6 +4,7 @@ import {
   ItemAttributesSchema,
   type UpdateListingRequest,
 } from "@seller/shared";
+import type { AiErrorCode } from "../ai/errors.js";
 import {
   createConversation as createConversationRecord,
   findConversationById,
@@ -41,15 +42,26 @@ import {
 import { mergeAttributes } from "../fsm/mergeAttributes.js";
 import { getItemAttributeExtractor } from "../extraction/createExtractor.js";
 import { sanitizeRawDelta } from "../extraction/sanitizeDelta.js";
-import { ExtractionValidationError } from "../extraction/errors.js";
+import {
+  ExtractionProviderError,
+  ExtractionValidationError,
+} from "../extraction/errors.js";
 import type { ItemAttributeExtractor } from "../extraction/types.js";
+import {
+  buildExtractionContext,
+  EXTRACTION_MESSAGE_LIMIT,
+} from "./context/extractionContext.js";
+import { buildListingGenerationContext } from "./context/listingContext.js";
 import { getListingGenerator } from "../listing/createListingGenerator.js";
-import { DEFAULT_LISTING_CURRENCY } from "../listing/constants.js";
 import { validateListingClaims } from "../listing/validateListingClaims.js";
-import { ListingGenerationValidationError } from "../listing/errors.js";
+import {
+  ListingGenerationProviderError,
+  ListingGenerationValidationError,
+} from "../listing/errors.js";
 import type { ListingGenerator } from "../listing/types.js";
+import { getSellerPreferences } from "./sellerPreferenceService.js";
 
-const RECENT_MESSAGES_WINDOW = 6;
+const StrictItemAttributesSchema = ItemAttributesSchema.strict();
 
 export interface CreatedConversation {
   conversation: ConversationDocument;
@@ -236,8 +248,25 @@ export async function approveListing(
   return approveDraftReadyConversation(conversationId);
 }
 
-export type ExtractionFailureReason = "provider_error" | "invalid_response" | "schema_invalid";
-export type ListingFailureReason = "provider_error" | "invalid_output";
+export type ExtractionFailureReason = AiErrorCode;
+export type ListingFailureReason = AiErrorCode;
+
+function extractionFailureReason(err: unknown): ExtractionFailureReason {
+  if (err instanceof ExtractionProviderError || err instanceof ExtractionValidationError) {
+    return err.code;
+  }
+  return "AI_UNKNOWN";
+}
+
+function listingFailureReason(err: unknown): ListingFailureReason {
+  if (
+    err instanceof ListingGenerationProviderError ||
+    err instanceof ListingGenerationValidationError
+  ) {
+    return err.code;
+  }
+  return "AI_UNKNOWN";
+}
 
 export type PostMessageResult =
   | { kind: "not_found" }
@@ -307,31 +336,30 @@ export async function postSellerMessage(
   // A small bounded window of recent messages, not the full transcript —
   // enough for the extractor to resolve things like "actually it's a medium"
   // without every request growing with conversation length.
-  const recentMessages = await findRecentMessages(conversationId, RECENT_MESSAGES_WINDOW);
+  const recentMessages = await findRecentMessages(conversationId, EXTRACTION_MESSAGE_LIMIT);
+  const extractionContext = buildExtractionContext({
+    latestMessage: content,
+    currentAttributes: itemDraft.attributes,
+    recentMessages: recentMessages.map((m) => ({ role: m.role, content: m.content })),
+  });
 
   let rawDelta: unknown;
   try {
-    rawDelta = await extractor.extract({
-      message: content,
-      currentAttributes: itemDraft.attributes,
-      recentMessages: recentMessages.map((m) => ({ role: m.role, content: m.content })),
-    });
+    rawDelta = await extractor.extract(extractionContext);
   } catch (err) {
     return {
       kind: "extraction_failed",
       conversation,
-      reason: err instanceof ExtractionValidationError ? "invalid_response" : "provider_error",
+      reason: extractionFailureReason(err),
     };
   }
 
   // Applied uniformly regardless of which extractor produced the delta:
-  // null/empty "I don't know" values are dropped rather than failing the
-  // whole extraction, and unrecognized invented fields are silently
-  // stripped by the schema (zod drops unknown object keys by default)
-  // rather than being stored.
-  const patchResult = ItemAttributesSchema.safeParse(sanitizeRawDelta(rawDelta));
+  // null/empty "I don't know" values are dropped rather than overwriting
+  // known facts, and unsupported invented fields fail validation.
+  const patchResult = StrictItemAttributesSchema.safeParse(sanitizeRawDelta(rawDelta));
   if (!patchResult.success) {
-    return { kind: "extraction_failed", conversation, reason: "schema_invalid" };
+    return { kind: "extraction_failed", conversation, reason: "AI_INVALID_RESPONSE" };
   }
 
   // Only persist the seller message once extraction has produced valid
@@ -377,10 +405,11 @@ export async function postSellerMessage(
   workingConversation = await updateConversationState(workingConversation, "generating");
 
   try {
-    const rawListing = await listingGenerator.generate({
+    const preferences = await getSellerPreferences(conversation.sellerId);
+    const rawListing = await listingGenerator.generate(buildListingGenerationContext({
       attributes: mergedAttributes,
-      currency: DEFAULT_LISTING_CURRENCY,
-    });
+      preferences,
+    }));
 
     const listingResult = GeneratedListingSchema.safeParse(rawListing);
     if (!listingResult.success) {
@@ -421,7 +450,7 @@ export async function postSellerMessage(
       kind: "listing_generation_failed",
       conversation: workingConversation,
       itemDraft: updatedDraft,
-      reason: err instanceof ListingGenerationValidationError ? "invalid_output" : "provider_error",
+      reason: listingFailureReason(err),
     };
   }
 }

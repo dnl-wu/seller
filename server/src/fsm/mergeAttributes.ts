@@ -2,18 +2,18 @@ import type { ItemAttributes } from "@seller/shared";
 
 /**
  * Merges an extractor's proposed patch into known attributes. Only
- * non-null/non-undefined values overwrite existing ones — this is what
- * keeps a later empty or "unknown" extraction from erasing a fact that
- * was already established earlier in the conversation.
+ * non-null/non-undefined/non-empty-string values overwrite existing ones.
+ * Arrays are replaced when present; for the current item attributes this lets
+ * a later explicit defects list correct the previous one.
  */
 function assignIfPresent<K extends keyof ItemAttributes>(
   target: ItemAttributes,
   key: K,
   value: ItemAttributes[K] | undefined | null,
 ): void {
-  if (value !== undefined && value !== null) {
-    target[key] = value;
-  }
+  if (value === undefined || value === null) return;
+  if (typeof value === "string" && value.trim() === "") return;
+  target[key] = value;
 }
 
 export function mergeAttributes(

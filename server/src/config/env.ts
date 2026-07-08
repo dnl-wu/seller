@@ -1,16 +1,21 @@
 import "dotenv/config";
 import { z } from "zod";
 
+const DEFAULT_LLM_TIMEOUT_MS = 15_000;
+
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   MONGODB_URI: z.string().min(1, "MONGODB_URI is required"),
   ATTRIBUTE_EXTRACTOR: z.enum(["keyword", "llm"]).default("keyword"),
   LISTING_GENERATOR: z.enum(["template", "llm"]).default("template"),
-  AZURE_OPENAI_API_KEY: z.string().default(""),
-  AZURE_OPENAI_ENDPOINT: z.string().default(""),
-  AZURE_OPENAI_DEPLOYMENT: z.string().default(""),
+  LLM_API_KEY: z.string().optional(),
+  LLM_MODEL: z.string().optional(),
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  AZURE_OPENAI_API_KEY: z.string().optional(),
+  AZURE_OPENAI_ENDPOINT: z.string().optional(),
+  AZURE_OPENAI_DEPLOYMENT: z.string().optional(),
   AZURE_OPENAI_API_VERSION: z.string().default("2024-10-21"),
-  AZURE_OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  AZURE_OPENAI_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
 });
 
 const parsed = EnvSchema.safeParse(process.env);
@@ -22,23 +27,20 @@ if (!parsed.success) {
 }
 
 const data = parsed.data;
+const llmApiKey = data.LLM_API_KEY ?? data.AZURE_OPENAI_API_KEY ?? "";
+const llmModel = data.LLM_MODEL ?? data.AZURE_OPENAI_DEPLOYMENT ?? "";
+const llmTimeoutMs =
+  data.LLM_TIMEOUT_MS ?? data.AZURE_OPENAI_TIMEOUT_MS ?? DEFAULT_LLM_TIMEOUT_MS;
+const usesLlm = data.ATTRIBUTE_EXTRACTOR === "llm" || data.LISTING_GENERATOR === "llm";
 
-// Fail fast if either the extractor or the listing generator is configured
-// to call Azure OpenAI but the credentials needed to do so are missing.
-if (data.ATTRIBUTE_EXTRACTOR === "llm" || data.LISTING_GENERATOR === "llm") {
-  const required = {
-    AZURE_OPENAI_API_KEY: data.AZURE_OPENAI_API_KEY,
-    AZURE_OPENAI_ENDPOINT: data.AZURE_OPENAI_ENDPOINT,
-    AZURE_OPENAI_DEPLOYMENT: data.AZURE_OPENAI_DEPLOYMENT,
-  };
-  const missing = Object.entries(required)
-    .filter(([, value]) => !value)
-    .map(([key]) => key);
+if (usesLlm) {
+  const missing: string[] = [];
+  if (!llmApiKey) missing.push("LLM_API_KEY or AZURE_OPENAI_API_KEY");
+  if (!llmModel) missing.push("LLM_MODEL or AZURE_OPENAI_DEPLOYMENT");
+  if (!data.AZURE_OPENAI_ENDPOINT) missing.push("AZURE_OPENAI_ENDPOINT");
 
   if (missing.length > 0) {
-    console.error(
-      `ATTRIBUTE_EXTRACTOR=llm or LISTING_GENERATOR=llm requires: ${missing.join(", ")}`,
-    );
+    console.error(`LLM provider configuration is incomplete. Missing: ${missing.join(", ")}`);
     process.exit(1);
   }
 }
@@ -48,11 +50,16 @@ export const env = {
   mongoUri: data.MONGODB_URI,
   attributeExtractor: data.ATTRIBUTE_EXTRACTOR,
   listingGenerator: data.LISTING_GENERATOR,
+  llm: {
+    apiKey: llmApiKey,
+    model: llmModel,
+    timeoutMs: llmTimeoutMs,
+  },
   azureOpenAi: {
-    apiKey: data.AZURE_OPENAI_API_KEY,
-    endpoint: data.AZURE_OPENAI_ENDPOINT,
-    deployment: data.AZURE_OPENAI_DEPLOYMENT,
+    apiKey: llmApiKey,
+    endpoint: data.AZURE_OPENAI_ENDPOINT ?? "",
+    deployment: llmModel,
     apiVersion: data.AZURE_OPENAI_API_VERSION,
-    timeoutMs: data.AZURE_OPENAI_TIMEOUT_MS,
+    timeoutMs: llmTimeoutMs,
   },
 };

@@ -1,15 +1,5 @@
-import type { ItemAttributes, MessageRole } from "@seller/shared";
-
-export interface RecentMessage {
-  role: MessageRole;
-  content: string;
-}
-
-export interface ExtractionInput {
-  message: string;
-  currentAttributes: ItemAttributes;
-  recentMessages?: RecentMessage[];
-}
+import type { ExtractionContext } from "../services/context/context.types.js";
+import type { ItemAttributes } from "@seller/shared";
 
 export type ItemAttributeDelta = Partial<ItemAttributes>;
 
@@ -22,5 +12,5 @@ export type ItemAttributeDelta = Partial<ItemAttributes>;
  * responsible for validating and merging it, not the extractor.
  */
 export interface ItemAttributeExtractor {
-  extract(input: ExtractionInput): Promise<ItemAttributeDelta>;
+  extract(context: ExtractionContext): Promise<ItemAttributeDelta>;
 }

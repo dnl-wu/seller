@@ -9,6 +9,7 @@ import { MissingFields } from "../components/MissingFields/MissingFields.js";
 import { ListingPreview } from "../components/ListingPreview/ListingPreview.js";
 import { ErrorBanner } from "../components/ErrorBanner/ErrorBanner.js";
 import { MobileTabs, type MobileTab } from "../components/MobileTabs/MobileTabs.js";
+import { PreferencesSettings } from "../components/PreferencesSettings/PreferencesSettings.js";
 import { useConversation } from "../hooks/useConversation.js";
 import { getOrCreateSellerId } from "../utils/sellerIdentity.js";
 import { getThinkingLabel, isAcceptingMessages } from "../utils/conversationState.js";
@@ -46,6 +47,7 @@ export function SellerAgentPage() {
 
   const [inputValue, setInputValue] = useState("");
   const [activeTab, setActiveTab] = useState<MobileTab>("conversation");
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
   const hadListingDraftRef = useRef(false);
 
   useEffect(() => {
@@ -76,7 +78,16 @@ export function SellerAgentPage() {
 
   return (
     <div className="flex h-screen flex-col bg-main-bg text-primary-text">
-      <AppHeader onNewListing={() => void handleNewListing()} newListingDisabled={isInitializing} />
+      <AppHeader
+        onNewListing={() => void handleNewListing()}
+        onOpenPreferences={() => setPreferencesOpen(true)}
+        newListingDisabled={isInitializing}
+      />
+      <PreferencesSettings
+        isOpen={preferencesOpen}
+        sellerId={sellerId}
+        onClose={() => setPreferencesOpen(false)}
+      />
 
       <MobileTabs
         activeTab={activeTab}

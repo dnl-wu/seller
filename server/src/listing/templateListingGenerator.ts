@@ -1,12 +1,22 @@
-import type { GeneratedListing, ItemAttributes, ItemCondition } from "@seller/shared";
-import type { ListingGenerationInput, ListingGenerator } from "./types.js";
+import type {
+  DescriptionLength,
+  GeneratedListing,
+  ItemAttributes,
+  ItemCondition,
+  PricingStrategy,
+  ToneOfVoice,
+} from "@seller/shared";
+import type {
+  ListingGenerationContext,
+  ListingPreferenceContext,
+} from "../services/context/context.types.js";
+import type { ListingGenerator } from "./types.js";
 
 /**
  * Deterministic, template-based stand-in for real listing generation. Like
- * KeywordItemAttributeExtractor, this does not understand language — it
- * only ever states facts already present in the structured attributes, so
- * it's a safe default (LISTING_GENERATOR=template) for dev/tests without
- * any AI configured.
+ * KeywordItemAttributeExtractor, this does not understand language; it only
+ * states facts already present in the structured attributes, plus explicit
+ * seller preferences that control style and strategy.
  */
 
 const CONDITION_LABELS: Record<ItemCondition, string> = {
@@ -25,18 +35,59 @@ const CONDITION_DISCOUNT: Record<ItemCondition, number> = {
   poor: 0.2,
 };
 
+const PRICE_STRATEGY_MULTIPLIER: Record<PricingStrategy, number> = {
+  sell_fast: 0.9,
+  balanced: 1,
+  maximize_price: 1.12,
+};
+
 const FALLBACK_PRICE = 20;
 
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function estimatePrice(attributes: ItemAttributes): number {
-  if (attributes.originalPrice === undefined) {
-    return FALLBACK_PRICE;
+function estimatePrice(attributes: ItemAttributes, pricingStrategy: PricingStrategy): number {
+  const base =
+    attributes.originalPrice === undefined
+      ? FALLBACK_PRICE
+      : attributes.originalPrice *
+        (attributes.condition ? CONDITION_DISCOUNT[attributes.condition] : 0.5);
+  return Math.round(base * PRICE_STRATEGY_MULTIPLIER[pricingStrategy] * 100) / 100;
+}
+
+function toneIntro(toneOfVoice: ToneOfVoice, subject: string, size: string | undefined): string {
+  const sizeText = size ? `, size ${size}` : "";
+  if (toneOfVoice === "professional") {
+    return `${subject}${sizeText}, prepared for a straightforward resale listing.`;
   }
-  const discount = attributes.condition ? CONDITION_DISCOUNT[attributes.condition] : 0.5;
-  return Math.round(attributes.originalPrice * discount * 100) / 100;
+  if (toneOfVoice === "friendly") {
+    return `Easygoing ${subject}${sizeText} ready for its next owner.`;
+  }
+  return `${subject}${sizeText}.`;
+}
+
+function strategyLine(pricingStrategy: PricingStrategy): string | undefined {
+  if (pricingStrategy === "sell_fast") {
+    return "Price is set competitively for a quicker sale.";
+  }
+  if (pricingStrategy === "maximize_price") {
+    return "Price is set as a higher initial ask.";
+  }
+  return undefined;
+}
+
+function applyDescriptionLength(
+  lines: string[],
+  descriptionLength: DescriptionLength,
+): string[] {
+  if (descriptionLength === "short") {
+    return lines.slice(0, 2);
+  }
+  if (descriptionLength === "detailed") {
+    return lines;
+  }
+  return lines.slice(0, Math.min(lines.length, 4));
 }
 
 function buildTitle(attributes: ItemAttributes): string {
@@ -48,7 +99,10 @@ function buildTitle(attributes: ItemAttributes): string {
   return parts.join(" ");
 }
 
-function buildDescription(attributes: ItemAttributes): string {
+function buildDescription(
+  attributes: ItemAttributes,
+  preferences: ListingPreferenceContext,
+): string {
   const lines: string[] = [];
 
   const subject = [
@@ -57,7 +111,7 @@ function buildDescription(attributes: ItemAttributes): string {
   ]
     .filter(Boolean)
     .join(" ");
-  lines.push(`${subject}${attributes.size ? `, size ${attributes.size}` : ""}.`);
+  lines.push(toneIntro(preferences.toneOfVoice, subject, attributes.size));
 
   if (attributes.condition) {
     lines.push(`Condition: ${CONDITION_LABELS[attributes.condition]}.`);
@@ -75,16 +129,22 @@ function buildDescription(attributes: ItemAttributes): string {
     lines.push("No known defects.");
   }
 
-  return lines.join(" ");
+  const pricingLine = strategyLine(preferences.pricingStrategy);
+  if (pricingLine) lines.push(pricingLine);
+  if (preferences.shippingPreference) {
+    lines.push(preferences.shippingPreference);
+  }
+
+  return applyDescriptionLength(lines, preferences.descriptionLength).join(" ");
 }
 
 export class TemplateListingGenerator implements ListingGenerator {
-  async generate({ attributes, currency }: ListingGenerationInput): Promise<GeneratedListing> {
+  async generate({ attributes, preferences }: ListingGenerationContext): Promise<GeneratedListing> {
     return {
       title: buildTitle(attributes),
-      description: buildDescription(attributes),
-      suggestedPrice: estimatePrice(attributes),
-      currency,
+      description: buildDescription(attributes, preferences),
+      suggestedPrice: estimatePrice(attributes, preferences.pricingStrategy),
+      currency: preferences.defaultCurrency,
     };
   }
 }

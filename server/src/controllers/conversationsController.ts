@@ -6,6 +6,7 @@ import {
   UpdateListingRequestSchema,
 } from "@seller/shared";
 import * as conversationService from "../services/conversationService.js";
+import type { AiErrorCode } from "../ai/errors.js";
 import {
   serializeConversation,
   serializeItemDraft,
@@ -13,6 +14,23 @@ import {
   serializeListingDraft,
   serializeConversationDetail,
 } from "./serializers.js";
+
+function aiErrorMessage(code: AiErrorCode, task: "Attribute extraction" | "Listing generation"): string {
+  switch (code) {
+    case "AI_TIMEOUT":
+      return `${task} timed out. Please try again.`;
+    case "AI_RATE_LIMITED":
+      return `${task} is rate limited. Please try again shortly.`;
+    case "AI_INVALID_RESPONSE":
+      return `${task} returned an unusable response. Please try again.`;
+    case "AI_UNAVAILABLE":
+      return `${task} is temporarily unavailable. Please try again.`;
+    case "AI_MISCONFIGURED":
+      return `${task} is not configured correctly.`;
+    case "AI_UNKNOWN":
+      return `${task} failed unexpectedly. Please try again.`;
+  }
+}
 
 export async function createConversation(req: Request, res: Response): Promise<void> {
   const parsed = CreateConversationRequestSchema.safeParse(req.body);
@@ -78,21 +96,16 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
       });
       return;
     case "extraction_failed": {
-      const messages: Record<typeof result.reason, string> = {
-        provider_error: "Attribute extraction is temporarily unavailable. Please try again.",
-        invalid_response: "Attribute extraction returned an unusable response. Please try again.",
-        schema_invalid: "Attribute extraction returned invalid data. Please try again.",
-      };
-      res.status(502).json({ error: messages[result.reason] });
+      res.status(502).json({
+        code: result.reason,
+        error: aiErrorMessage(result.reason, "Attribute extraction"),
+      });
       return;
     }
     case "listing_generation_failed": {
-      const messages: Record<typeof result.reason, string> = {
-        provider_error: "Listing generation is temporarily unavailable. Please try again.",
-        invalid_output: "Listing generation produced invalid content. Please try again.",
-      };
       res.status(502).json({
-        error: messages[result.reason],
+        code: result.reason,
+        error: aiErrorMessage(result.reason, "Listing generation"),
         conversation: serializeConversation(result.conversation),
         itemDraft: serializeItemDraft(result.itemDraft),
       });

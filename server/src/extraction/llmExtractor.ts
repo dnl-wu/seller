@@ -1,62 +1,43 @@
+import { z } from "zod";
 import { ItemAttributesSchema } from "@seller/shared";
-import type { ExtractionInput, ItemAttributeDelta, ItemAttributeExtractor } from "./types.js";
+import type { ExtractionContext } from "../services/context/context.types.js";
+import { classifyAiProviderError } from "../ai/errors.js";
+import type { ItemAttributeDelta, ItemAttributeExtractor } from "./types.js";
 import type { LlmProvider } from "./llmProvider.js";
 import { ExtractionProviderError, ExtractionValidationError } from "./errors.js";
+import { buildExtractionPrompt } from "./prompts.js";
 
-const SUPPORTED_FIELDS = Object.keys(ItemAttributesSchema.shape);
-
-function buildSystemPrompt(): string {
-  return [
-    "You extract structured resale-item attributes from a seller's chat message.",
-    `Only return JSON with a subset of these fields: ${SUPPORTED_FIELDS.join(", ")}.`,
-    "Only include a field if the seller's message states it explicitly.",
-    "Never guess, infer, or invent a value the seller did not state.",
-    "Never infer product specifications from general knowledge about the brand or model.",
-    "Omit any field you are not confident about — do not use null or empty strings for unknown fields.",
-    "Respond with a single JSON object and nothing else.",
-  ].join(" ");
-}
-
-function buildUserPrompt(input: ExtractionInput): string {
-  const lines: string[] = [];
-  if (input.recentMessages?.length) {
-    lines.push("Recent conversation (for context only):");
-    for (const entry of input.recentMessages) {
-      lines.push(`${entry.role}: ${entry.content}`);
-    }
-  }
-  lines.push("Known attributes so far:");
-  lines.push(JSON.stringify(input.currentAttributes));
-  lines.push("Latest seller message:");
-  lines.push(input.message);
-  return lines.join("\n");
-}
+const RawItemAttributeDeltaSchema = z
+  .object(
+    Object.fromEntries(
+      Object.keys(ItemAttributesSchema.shape).map((field) => [field, z.unknown().optional()]),
+    ) as z.ZodRawShape,
+  )
+  .strict();
 
 /**
- * Real, AI-backed ItemAttributeExtractor. Only responsible for getting a
- * usable JSON object out of the provider — schema validation of the
- * *contents* (sanitizing nulls, rejecting unsupported values, stripping
- * unknown fields) happens uniformly in the service layer for every
- * extractor implementation, not here.
+ * Real, AI-backed ItemAttributeExtractor. It accepts an assembled,
+ * provider-neutral ExtractionContext and returns only a proposed delta.
+ * The service layer still owns sanitization, schema validation of values,
+ * and deterministic merge behavior.
  */
 export class LlmItemAttributeExtractor implements ItemAttributeExtractor {
   constructor(private readonly provider: LlmProvider) {}
 
-  async extract(input: ExtractionInput): Promise<ItemAttributeDelta> {
+  async extract(context: ExtractionContext): Promise<ItemAttributeDelta> {
     let raw: string;
     try {
-      raw = await this.provider.complete({
-        system: buildSystemPrompt(),
-        user: buildUserPrompt(input),
-      });
+      raw = await this.provider.complete(buildExtractionPrompt(context));
     } catch (err) {
-      throw new ExtractionProviderError("Attribute extraction provider request failed", {
-        cause: err,
-      });
+      throw new ExtractionProviderError(
+        "Attribute extraction provider request failed",
+        classifyAiProviderError(err),
+        { cause: err },
+      );
     }
 
     if (!raw || !raw.trim()) {
-      throw new ExtractionProviderError(
+      throw new ExtractionValidationError(
         "Attribute extraction provider returned an empty response",
       );
     }
@@ -67,16 +48,18 @@ export class LlmItemAttributeExtractor implements ItemAttributeExtractor {
     } catch (err) {
       throw new ExtractionValidationError(
         "Attribute extraction response was not valid JSON",
+        "AI_INVALID_RESPONSE",
         { cause: err },
       );
     }
 
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    const result = RawItemAttributeDeltaSchema.safeParse(parsed);
+    if (!result.success) {
       throw new ExtractionValidationError(
-        "Attribute extraction response was not a JSON object",
+        "Attribute extraction response did not match the expected JSON object shape",
       );
     }
 
-    return parsed as ItemAttributeDelta;
+    return result.data as ItemAttributeDelta;
   }
 }

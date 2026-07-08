@@ -1,5 +1,6 @@
 import type { ItemAttributes, ItemCondition } from "@seller/shared";
-import type { ExtractionInput, ItemAttributeDelta, ItemAttributeExtractor } from "./types.js";
+import type { ExtractionContext } from "../services/context/context.types.js";
+import type { ItemAttributeDelta, ItemAttributeExtractor } from "./types.js";
 
 /**
  * Deterministic, keyword-based stand-in for real extraction. This is NOT
@@ -75,10 +76,10 @@ function findWordKeyword(haystack: string, keywords: string[]): string | undefin
 }
 
 export class KeywordItemAttributeExtractor implements ItemAttributeExtractor {
-  async extract(input: ExtractionInput): Promise<ItemAttributeDelta> {
+  async extract(context: ExtractionContext): Promise<ItemAttributeDelta> {
     // Strip apostrophes so contractions like "it's" don't create a false
     // word-boundary match for single-letter size tokens (the "s" in "it's").
-    const text = input.message.toLowerCase().replace(/['’]/g, "");
+    const text = context.latestMessage.toLowerCase().replace(/['’]/g, "");
     const patch: Partial<ItemAttributes> = {};
 
     if (findWordKeyword(text, CLOTHING_KEYWORDS)) {

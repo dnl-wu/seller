@@ -24,6 +24,10 @@ vi.mock("../api/conversations.js", () => {
     ApiError,
   };
 });
+vi.mock("../api/preferences.js", () => ({
+  getSellerPreferences: vi.fn(),
+  updateSellerPreferences: vi.fn(),
+}));
 
 import {
   ApiError,
@@ -33,12 +37,20 @@ import {
   sendMessage,
   updateListing,
 } from "../api/conversations.js";
+import { getSellerPreferences } from "../api/preferences.js";
 
 const SELLER_ID_KEY = "seller-agent:seller-id";
 
 beforeEach(() => {
   window.localStorage.clear();
   vi.clearAllMocks();
+  vi.mocked(getSellerPreferences).mockResolvedValue({
+    sellerId: "seller-1",
+    toneOfVoice: "concise",
+    descriptionLength: "medium",
+    pricingStrategy: "balanced",
+    defaultCurrency: "CAD",
+  });
 });
 
 function mockFreshConversation() {
@@ -264,6 +276,18 @@ describe("SellerAgentPage", () => {
     await waitFor(() => expect(createConversation).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(await screen.findByText(/create your listing/i)).toBeInTheDocument();
+  });
+
+  it("opens seller preferences from the header without resetting the conversation", async () => {
+    mockFreshConversation();
+    const user = userEvent.setup();
+    await renderAndWaitForInit();
+
+    await user.click(screen.getByRole("button", { name: /settings/i }));
+
+    expect(await screen.findByRole("heading", { name: /preferences/i })).toBeInTheDocument();
+    expect(getSellerPreferences).toHaveBeenCalledWith(expect.any(String));
+    expect(createConversation).toHaveBeenCalledTimes(1);
   });
 
   it("renders a listing draft once the backend reaches draft_ready", async () => {
