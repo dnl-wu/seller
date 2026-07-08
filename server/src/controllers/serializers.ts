@@ -4,12 +4,14 @@ import type { ItemDraftDocument } from "../models/ItemDraft.js";
 import type { MessageDocument } from "../models/Message.js";
 import type { ListingDraftDocument } from "../models/ListingDraft.js";
 import type { ConversationDetail } from "../services/conversationService.js";
+import { readVersion } from "../concurrency/errors.js";
 
 export function serializeConversation(doc: ConversationDocument): Conversation {
   return {
     id: doc._id.toString(),
     sellerId: doc.sellerId,
     state: doc.state,
+    version: readVersion(doc.version),
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
   };
@@ -21,6 +23,7 @@ export function serializeItemDraft(doc: ItemDraftDocument): ItemDraft {
     conversationId: doc.conversationId.toString(),
     attributes: doc.attributes,
     missingFields: doc.missingFields,
+    version: readVersion(doc.version),
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
   };
@@ -47,6 +50,7 @@ export function serializeListingDraft(doc: ListingDraftDocument): ListingDraft {
     suggestedPrice: doc.suggestedPrice,
     currency: doc.currency,
     status: doc.status,
+    version: readVersion(doc.version),
     createdAt: doc.createdAt.toISOString(),
     updatedAt: doc.updatedAt.toISOString(),
   };

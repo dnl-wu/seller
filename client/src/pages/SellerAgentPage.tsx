@@ -39,6 +39,7 @@ export function SellerAgentPage() {
     error,
     changedFields,
     approveListing,
+    reloadConversation,
     sendMessage,
     startNewListing,
     dismissError,
@@ -140,6 +141,7 @@ export function SellerAgentPage() {
                 isUpdating={isUpdatingListing}
                 onApproveListing={approveListing}
                 onUpdateListing={updateListing}
+                onReloadLatest={reloadConversation}
               />
             </>
           )}

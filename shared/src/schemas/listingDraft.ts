@@ -25,8 +25,15 @@ export const UpdateListingRequestSchema = z.object({
   description: z.string().trim().min(1),
   suggestedPrice: z.number().finite().nonnegative(),
   currency: CurrencySchema,
+  expectedVersion: z.number().int().nonnegative(),
 });
 export type UpdateListingRequest = z.infer<typeof UpdateListingRequestSchema>;
+
+export const ApproveListingRequestSchema = z.object({
+  expectedListingVersion: z.number().int().nonnegative(),
+  expectedConversationVersion: z.number().int().nonnegative().optional(),
+});
+export type ApproveListingRequest = z.infer<typeof ApproveListingRequestSchema>;
 
 export const ListingDraftSchema = z.object({
   id: z.string().min(1),
@@ -37,6 +44,7 @@ export const ListingDraftSchema = z.object({
   suggestedPrice: z.number().finite().nonnegative(),
   currency: CurrencySchema,
   status: ListingDraftStatusSchema,
+  version: z.number().int().nonnegative(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });

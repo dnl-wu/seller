@@ -1,9 +1,11 @@
 import { Schema, model, type HydratedDocument } from "mongoose";
 import { ConversationStateSchema, type ConversationState } from "@seller/shared";
+import { ConcurrencyConflictError, versionPredicate } from "../concurrency/errors.js";
 
 export interface ConversationAttrs {
   sellerId: string;
   state: ConversationState;
+  version: number;
 }
 
 interface ConversationTimestamps {
@@ -20,6 +22,7 @@ const conversationSchema = new Schema<ConversationAttrs>(
       required: true,
       default: "collecting",
     },
+    version: { type: Number, required: true, default: 0 },
   },
   { timestamps: true },
 );
@@ -41,7 +44,7 @@ export const ConversationModel = model<ConversationAttrs>(
 export async function createConversation(
   sellerId: string,
 ): Promise<ConversationDocument> {
-  const doc = await ConversationModel.create({ sellerId, state: "collecting" });
+  const doc = await ConversationModel.create({ sellerId, state: "collecting", version: 0 });
   return doc as ConversationDocument;
 }
 
@@ -56,9 +59,12 @@ export async function updateConversationState(
   conversation: ConversationDocument,
   state: ConversationState,
 ): Promise<ConversationDocument> {
-  conversation.state = state;
-  const saved = await conversation.save();
-  return saved as ConversationDocument;
+  return updateConversationStateIfVersion(
+    conversation._id.toString(),
+    conversation.state,
+    conversation.version ?? 0,
+    state,
+  );
 }
 
 export async function transitionConversationState(
@@ -68,8 +74,25 @@ export async function transitionConversationState(
 ): Promise<ConversationDocument | null> {
   const doc = await ConversationModel.findOneAndUpdate(
     { _id: id, state: from },
-    { $set: { state: to } },
+    { $set: { state: to }, $inc: { version: 1 } },
     { new: true, runValidators: true },
   );
   return doc as ConversationDocument | null;
+}
+
+export async function updateConversationStateIfVersion(
+  id: string,
+  expectedState: ConversationState,
+  expectedVersion: number,
+  to: ConversationState,
+): Promise<ConversationDocument> {
+  const doc = await ConversationModel.findOneAndUpdate(
+    { _id: id, state: expectedState, ...versionPredicate(expectedVersion) },
+    { $set: { state: to }, $inc: { version: 1 } },
+    { new: true, runValidators: true },
+  );
+  if (!doc) {
+    throw new ConcurrencyConflictError("STALE_CONVERSATION_VERSION");
+  }
+  return doc as ConversationDocument;
 }

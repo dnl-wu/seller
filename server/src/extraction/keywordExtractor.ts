@@ -12,15 +12,19 @@ import type { ItemAttributeDelta, ItemAttributeExtractor } from "./types.js";
  */
 
 const CLOTHING_KEYWORDS = [
+  "blazer",
   "jacket",
   "coat",
   "shirt",
   "t-shirt",
   "tshirt",
+  "tee",
+  "top",
   "jeans",
   "pants",
   "dress",
   "sweater",
+  "fleece",
   "hoodie",
   "skirt",
   "shorts",
@@ -29,18 +33,49 @@ const CLOTHING_KEYWORDS = [
 // Order matters: earlier entries win when multiple phrases are present
 // (e.g. "like new" must be checked before the bare substring "new").
 const CONDITION_KEYWORDS: ReadonlyArray<readonly [string, ItemCondition]> = [
+  ["brand new", "new"],
   ["like new", "like_new"],
+  ["mint condition", "like_new"],
+  ["excellent condition", "like_new"],
+  ["very used", "poor"],
+  ["heavily used", "poor"],
+  ["very worn", "poor"],
+  ["beat up", "poor"],
+  ["well used", "fair"],
   ["new", "new"],
+  ["excellent", "like_new"],
+  ["mint", "like_new"],
   ["good", "good"],
+  ["decent", "good"],
+  ["ok", "fair"],
+  ["okay", "fair"],
   ["fair", "fair"],
   ["worn", "fair"],
+  ["used", "fair"],
+  ["bad", "poor"],
   ["poor", "poor"],
   ["damaged", "poor"],
 ];
 
-const SIZE_KEYWORDS = ["xs", "s", "m", "l", "xl", "xxl", "small", "medium", "large"];
+const SIZE_KEYWORDS = [
+  "extra small",
+  "extra large",
+  "double xl",
+  "xs",
+  "s",
+  "m",
+  "l",
+  "xl",
+  "xxl",
+  "small",
+  "medium",
+  "large",
+];
 
 const SIZE_NORMALIZATION: Record<string, string> = {
+  "extra small": "XS",
+  "extra large": "XL",
+  "double xl": "XXL",
   xs: "XS",
   s: "S",
   small: "S",
@@ -64,6 +99,14 @@ const BRAND_KEYWORDS = [
   "gap",
   "h&m",
   "patagonia",
+  "lululemon",
+  "aritzia",
+  "carhartt",
+  "columbia",
+  "under armour",
+  "puma",
+  "reebok",
+  "new balance",
 ];
 
 function includesWord(haystack: string, word: string): boolean {

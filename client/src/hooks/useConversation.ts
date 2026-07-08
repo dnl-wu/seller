@@ -21,6 +21,7 @@ import { toUiError, type UiError } from "../utils/conversationState.js";
 export interface ConversationView {
   id: string;
   state: ConversationState;
+  version: number;
   itemDraft: ItemDraft | null;
   messages: Message[];
   listingDraft: ListingDraft | null;
@@ -40,12 +41,14 @@ export interface ConversationUiState {
 export interface ListingActionResult {
   ok: boolean;
   error?: string;
+  conflict?: boolean;
 }
 
 export interface UseConversationResult extends ConversationUiState {
   sendMessage: (content: string) => Promise<boolean>;
   updateListing: (input: UpdateListingRequest) => Promise<ListingActionResult>;
   approveListing: () => Promise<ListingActionResult>;
+  reloadConversation: () => Promise<void>;
   startNewListing: () => Promise<void>;
   dismissError: () => void;
 }
@@ -54,6 +57,7 @@ function fromCreateResponse(res: CreateConversationResponse): ConversationView {
   return {
     id: res.conversationId,
     state: res.state,
+    version: 0,
     itemDraft: res.itemDraft,
     messages: [],
     listingDraft: null,
@@ -64,10 +68,21 @@ function fromGetResponse(res: GetConversationResponse): ConversationView {
   return {
     id: res.conversation.id,
     state: res.conversation.state,
+    version: res.conversation.version,
     itemDraft: res.itemDraft,
     messages: res.messages,
     listingDraft: res.listingDraft,
   };
+}
+
+function hasApiCode(err: unknown, codes: string[]): boolean {
+  return Boolean(
+    err &&
+      typeof err === "object" &&
+      "code" in err &&
+      typeof err.code === "string" &&
+      codes.includes(err.code),
+  );
 }
 
 function diffAttributeKeys(
@@ -168,7 +183,11 @@ export function useConversation(sellerId: string): UseConversationResult {
         setConversation(view);
         return { ok: true };
       } catch (err) {
-        return { ok: false, error: toUiError(err, "listing").message };
+        return {
+          ok: false,
+          error: toUiError(err, "listing").message,
+          conflict: hasApiCode(err, ["STALE_LISTING_VERSION", "CONCURRENCY_CONFLICT"]),
+        };
       } finally {
         setIsUpdatingListing(false);
       }
@@ -181,20 +200,45 @@ export function useConversation(sellerId: string): UseConversationResult {
       return { ok: false, error: "The listing is not ready to approve." };
     }
 
-    setIsApprovingListing(true);
-    try {
-      const fresh = await approveListingApi(conversation.id);
+      setIsApprovingListing(true);
+      try {
+      const listingDraft = conversation.listingDraft;
+      if (!listingDraft) {
+        return { ok: false, error: "The listing is not ready to approve." };
+      }
+      const fresh = await approveListingApi(conversation.id, {
+        expectedListingVersion: listingDraft.version,
+        expectedConversationVersion: conversation.version,
+      });
       const view = fromGetResponse(fresh);
       setChangedFields(new Set());
       previousAttributesRef.current = view.itemDraft?.attributes ?? null;
       setConversation(view);
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: toUiError(err, "approve").message };
+      return {
+        ok: false,
+        error: toUiError(err, "approve").message,
+        conflict:
+          hasApiCode(err, [
+            "STALE_LISTING_VERSION",
+            "STALE_CONVERSATION_VERSION",
+            "CONCURRENCY_CONFLICT",
+          ]),
+      };
     } finally {
       setIsApprovingListing(false);
     }
   }, [conversation, isApprovingListing, isUpdatingListing]);
+
+  const reloadConversation = useCallback(async () => {
+    if (!conversation) return;
+    const fresh = await getConversation(conversation.id);
+    const view = fromGetResponse(fresh);
+    setChangedFields(new Set());
+    previousAttributesRef.current = view.itemDraft?.attributes ?? null;
+    setConversation(view);
+  }, [conversation]);
 
   const dismissError = useCallback(() => setError(null), []);
 
@@ -209,6 +253,7 @@ export function useConversation(sellerId: string): UseConversationResult {
     sendMessage,
     updateListing,
     approveListing,
+    reloadConversation,
     startNewListing,
     dismissError,
   };

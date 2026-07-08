@@ -18,6 +18,7 @@ export function makeConversation(state: ConversationState = "collecting"): Conve
     id: "conv-1",
     sellerId: "seller-1",
     state,
+    version: 0,
     createdAt: "2024-01-01T00:00:00.000Z",
     updatedAt: "2024-01-01T00:00:00.000Z",
   };
@@ -32,6 +33,7 @@ export function makeItemDraft(
     conversationId: "conv-1",
     attributes,
     missingFields,
+    version: 0,
     createdAt: "2024-01-01T00:00:00.000Z",
     updatedAt: "2024-01-01T00:00:00.000Z",
   };
@@ -58,6 +60,7 @@ export function makeListingDraft(overrides: Partial<ListingDraft> = {}): Listing
     suggestedPrice: 40,
     currency: "CAD",
     status: "generated",
+    version: 0,
     createdAt: "2024-01-01T00:00:00.000Z",
     updatedAt: "2024-01-01T00:00:00.000Z",
     ...overrides,

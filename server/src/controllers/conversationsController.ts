@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { isValidObjectId } from "mongoose";
 import {
   CreateConversationRequestSchema,
+  ApproveListingRequestSchema,
   PostMessageRequestSchema,
   UpdateListingRequestSchema,
 } from "@seller/shared";
@@ -30,6 +31,25 @@ function aiErrorMessage(code: AiErrorCode, task: "Attribute extraction" | "Listi
     case "AI_UNKNOWN":
       return `${task} failed unexpectedly. Please try again.`;
   }
+}
+
+function sendConcurrencyConflict(
+  res: Response,
+  code: "CONCURRENCY_CONFLICT" | "STALE_LISTING_VERSION" | "STALE_CONVERSATION_VERSION",
+): void {
+  const messages = {
+    CONCURRENCY_CONFLICT: "This conversation changed while your request was being processed.",
+    STALE_LISTING_VERSION: "This listing changed while you were editing it.",
+    STALE_CONVERSATION_VERSION: "This conversation changed while your request was being processed.",
+  } satisfies Record<typeof code, string>;
+
+  res.status(409).json({
+    error: {
+      code,
+      message: messages[code],
+      retryable: true,
+    },
+  });
 }
 
 export async function createConversation(req: Request, res: Response): Promise<void> {
@@ -95,6 +115,9 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
         error: `Cannot accept new messages while conversation is in state "${result.conversation.state}"`,
       });
       return;
+    case "concurrency_conflict":
+      sendConcurrencyConflict(res, result.code);
+      return;
     case "extraction_failed": {
       res.status(502).json({
         code: result.reason,
@@ -155,6 +178,9 @@ function sendListingMutationResult(
             : `Listing can only be edited while conversation is in state "draft_ready"; current state is "${result.conversation.state}".`,
       });
       return;
+    case "concurrency_conflict":
+      sendConcurrencyConflict(res, result.code);
+      return;
     case "not_editable":
       res.status(409).json({
         error: `Listing is not editable while its status is "${result.listingDraft.status}".`,
@@ -197,6 +223,12 @@ export async function approveListing(req: Request, res: Response): Promise<void>
     return;
   }
 
-  const result = await conversationService.approveListing(conversationId);
+  const parsed = ApproveListingRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+    return;
+  }
+
+  const result = await conversationService.approveListing(conversationId, parsed.data);
   sendListingMutationResult(res, result, "approve");
 }

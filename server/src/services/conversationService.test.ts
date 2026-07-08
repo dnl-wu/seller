@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GeneratedListing, ItemAttributes } from "@seller/shared";
 import { ExtractionProviderError, ExtractionValidationError } from "../extraction/errors.js";
+import { ConcurrencyConflictError } from "../concurrency/errors.js";
 import type { ItemAttributeExtractor } from "../extraction/types.js";
 import type { ListingGenerator } from "../listing/types.js";
 
@@ -69,11 +70,13 @@ function makeConversationDoc(overrides: {
   id?: string;
   sellerId?: string;
   state?: "collecting" | "ready_to_generate" | "generating" | "draft_ready" | "approved";
+  version?: number;
 } = {}) {
   const doc = {
     _id: { toString: () => overrides.id ?? "conv1" },
     sellerId: overrides.sellerId ?? "demo-seller",
     state: overrides.state ?? "collecting",
+    version: overrides.version ?? 0,
     createdAt: new Date("2024-01-01T00:00:00.000Z"),
     updatedAt: new Date("2024-01-01T00:00:00.000Z"),
   };
@@ -87,12 +90,14 @@ function makeItemDraftDoc(overrides: {
   conversationId?: string;
   attributes?: ItemAttributes;
   missingFields?: string[];
+  version?: number;
 } = {}) {
   const doc = {
     _id: { toString: () => overrides.id ?? "draft1" },
     conversationId: { toString: () => overrides.conversationId ?? "conv1" },
     attributes: overrides.attributes ?? {},
     missingFields: overrides.missingFields ?? ["category", "condition", "size", "brand"],
+    version: overrides.version ?? 0,
     createdAt: new Date("2024-01-01T00:00:00.000Z"),
     updatedAt: new Date("2024-01-01T00:00:00.000Z"),
   };
@@ -126,6 +131,7 @@ function makeListingDraftDoc(overrides: {
   suggestedPrice?: number;
   currency?: "CAD" | "USD";
   status?: "generated" | "approved";
+  version?: number;
 } = {}) {
   const doc = {
     _id: { toString: () => overrides.id ?? "listing1" },
@@ -136,6 +142,7 @@ function makeListingDraftDoc(overrides: {
     suggestedPrice: overrides.suggestedPrice ?? 40,
     currency: overrides.currency ?? "CAD",
     status: overrides.status ?? "generated",
+    version: overrides.version ?? 0,
     createdAt: new Date("2024-01-01T00:00:00.000Z"),
     updatedAt: new Date("2024-01-01T00:00:00.000Z"),
   };
@@ -184,14 +191,18 @@ beforeEach(() => {
     makeListingDraftDoc({ conversationId, itemDraftId, ...listing })!,
   );
   vi.mocked(getSellerPreferences).mockResolvedValue(DEFAULT_TEST_PREFERENCES);
-  vi.mocked(updateGeneratedListingDraft).mockImplementation(async (conversationId, input) =>
-    makeListingDraftDoc({ conversationId, ...input })!,
-  );
+  vi.mocked(updateGeneratedListingDraft).mockImplementation(async (conversationId, input) => {
+    const { expectedVersion: _expectedVersion, ...listing } = input;
+    return makeListingDraftDoc({ conversationId, ...listing, version: _expectedVersion + 1 })!;
+  });
   vi.mocked(approveGeneratedListingDraft).mockImplementation(async (conversationId) =>
     makeListingDraftDoc({ conversationId, status: "approved" })!,
   );
   vi.mocked(transitionConversationState).mockImplementation(async (id, _from, state) =>
     makeConversationDoc({ id, state }),
+  );
+  vi.mocked(updateConversationState).mockImplementation(async (conv, state) =>
+    makeConversationDoc({ id: conv._id.toString(), state, version: (conv.version ?? 0) + 1 }),
   );
 });
 
@@ -286,6 +297,7 @@ describe("updateListing", () => {
       description: "Updated listing copy.",
       suggestedPrice: 45,
       currency: "USD",
+      expectedVersion: 0,
     });
 
     expect(result.kind).toBe("ok");
@@ -295,6 +307,7 @@ describe("updateListing", () => {
       description: "Updated listing copy.",
       suggestedPrice: 45,
       currency: "USD",
+      expectedVersion: 0,
     });
     expect(updateItemDraft).not.toHaveBeenCalled();
     expect(result.detail.itemDraft?.attributes.brand).toBe("nike");
@@ -313,6 +326,7 @@ describe("updateListing", () => {
       description: "Final copy.",
       suggestedPrice: 45,
       currency: "CAD",
+      expectedVersion: 0,
     });
 
     expect(result.kind).toBe("invalid_state");
@@ -330,10 +344,31 @@ describe("updateListing", () => {
       description: "Final copy.",
       suggestedPrice: 45,
       currency: "CAD",
+      expectedVersion: 0,
     });
 
     expect(result.kind).toBe("not_editable");
     expect(updateGeneratedListingDraft).not.toHaveBeenCalled();
+  });
+
+  it("returns a concurrency conflict for stale listing edits", async () => {
+    const conversationDoc = makeConversationDoc({ state: "draft_ready" });
+    const listingDraftDoc = makeListingDraftDoc({ version: 3 });
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(listingDraftDoc!);
+    vi.mocked(updateGeneratedListingDraft).mockRejectedValue(
+      new ConcurrencyConflictError("STALE_LISTING_VERSION"),
+    );
+
+    const result = await updateListing("conv1", {
+      title: "Final listing",
+      description: "Final copy.",
+      suggestedPrice: 45,
+      currency: "CAD",
+      expectedVersion: 2,
+    });
+
+    expect(result).toEqual({ kind: "concurrency_conflict", code: "STALE_LISTING_VERSION" });
   });
 });
 
@@ -354,16 +389,15 @@ describe("approveListing", () => {
       .mockResolvedValueOnce(generatedListing!)
       .mockResolvedValueOnce(approvedListing!);
 
-    const result = await approveListing("conv1");
+    const result = await approveListing("conv1", {
+      expectedListingVersion: 0,
+      expectedConversationVersion: 0,
+    });
 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok result");
-    expect(approveGeneratedListingDraft).toHaveBeenCalledWith("conv1");
-    expect(transitionConversationState).toHaveBeenCalledWith(
-      "conv1",
-      "draft_ready",
-      "approved",
-    );
+    expect(approveGeneratedListingDraft).toHaveBeenCalledWith("conv1", 0);
+    expect(updateConversationState).toHaveBeenCalledWith(draftReadyConversation, "approved");
     expect(result.detail.conversation.state).toBe("approved");
     expect(result.detail.listingDraft?.status).toBe("approved");
   });
@@ -377,7 +411,10 @@ describe("approveListing", () => {
     vi.mocked(findMessagesByConversation).mockResolvedValue([] as never);
     vi.mocked(findListingDraftByConversation).mockResolvedValue(approvedListing!);
 
-    const result = await approveListing("conv1");
+    const result = await approveListing("conv1", {
+      expectedListingVersion: 0,
+      expectedConversationVersion: 0,
+    });
 
     expect(result.kind).toBe("ok");
     expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
@@ -396,7 +433,10 @@ describe("approveListing", () => {
     vi.mocked(findMessagesByConversation).mockResolvedValue([] as never);
     vi.mocked(findListingDraftByConversation).mockResolvedValue(approvedListing!);
 
-    const result = await approveListing("conv1");
+    const result = await approveListing("conv1", {
+      expectedListingVersion: 0,
+      expectedConversationVersion: 0,
+    });
 
     expect(result.kind).toBe("ok");
     expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
@@ -412,11 +452,29 @@ describe("approveListing", () => {
     vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
     vi.mocked(findListingDraftByConversation).mockResolvedValue(makeListingDraftDoc()!);
 
-    const result = await approveListing("conv1");
+    const result = await approveListing("conv1", {
+      expectedListingVersion: 0,
+      expectedConversationVersion: 0,
+    });
 
     expect(result.kind).toBe("invalid_state");
     expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
     expect(transitionConversationState).not.toHaveBeenCalled();
+  });
+
+  it("returns a concurrency conflict for stale approval versions", async () => {
+    const conversationDoc = makeConversationDoc({ state: "draft_ready", version: 5 });
+    const listingDraftDoc = makeListingDraftDoc({ version: 3 });
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findListingDraftByConversation).mockResolvedValue(listingDraftDoc!);
+
+    const result = await approveListing("conv1", {
+      expectedListingVersion: 2,
+      expectedConversationVersion: 5,
+    });
+
+    expect(result).toEqual({ kind: "concurrency_conflict", code: "STALE_LISTING_VERSION" });
+    expect(approveGeneratedListingDraft).not.toHaveBeenCalled();
   });
 });
 

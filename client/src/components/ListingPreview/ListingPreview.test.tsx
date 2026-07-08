@@ -11,11 +11,13 @@ function renderPreview(overrides: {
   isGenerating?: boolean;
   isUpdating?: boolean;
   listingDraft?: ReturnType<typeof makeListingDraft> | null;
-  onApproveListing?: () => Promise<{ ok: boolean; error?: string }>;
-  onUpdateListing?: (input: UpdateListingRequest) => Promise<{ ok: boolean; error?: string }>;
+  onApproveListing?: () => Promise<{ ok: boolean; error?: string; conflict?: boolean }>;
+  onUpdateListing?: (input: UpdateListingRequest) => Promise<{ ok: boolean; error?: string; conflict?: boolean }>;
+  onReloadLatest?: () => Promise<void>;
 } = {}) {
   const onApproveListing = overrides.onApproveListing ?? vi.fn(async () => ({ ok: true }));
   const onUpdateListing = overrides.onUpdateListing ?? vi.fn(async () => ({ ok: true }));
+  const onReloadLatest = overrides.onReloadLatest ?? vi.fn(async () => undefined);
 
   const view = render(
     <ListingPreview
@@ -30,10 +32,11 @@ function renderPreview(overrides: {
       isUpdating={overrides.isUpdating ?? false}
       onApproveListing={onApproveListing}
       onUpdateListing={onUpdateListing}
+      onReloadLatest={onReloadLatest}
     />,
   );
 
-  return { ...view, onApproveListing, onUpdateListing };
+  return { ...view, onApproveListing, onUpdateListing, onReloadLatest };
 }
 
 describe("ListingPreview", () => {
@@ -82,8 +85,33 @@ describe("ListingPreview", () => {
       description: "Updated description",
       suggestedPrice: 55,
       currency: "USD",
+      expectedVersion: 0,
     });
     await waitFor(() => expect(screen.queryByLabelText(/title/i)).not.toBeInTheDocument());
+  });
+
+  it("shows a reload action after a stale edit conflict while preserving edits", async () => {
+    const user = userEvent.setup();
+    const onReloadLatest = vi.fn(async () => undefined);
+    renderPreview({
+      onUpdateListing: vi.fn(async () => ({
+        ok: false,
+        error: "This listing changed while you were editing it.",
+        conflict: true,
+      })),
+      onReloadLatest,
+    });
+
+    await user.click(screen.getByRole("button", { name: /^edit$/i }));
+    await user.clear(screen.getByLabelText(/title/i));
+    await user.type(screen.getByLabelText(/title/i), "Unsaved title");
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/changed while you were editing/i);
+    expect(screen.getByLabelText(/title/i)).toHaveValue("Unsaved title");
+
+    await user.click(screen.getByRole("button", { name: /reload latest version/i }));
+    expect(onReloadLatest).toHaveBeenCalledTimes(1);
   });
 
   it("keeps unsaved edits visible when save fails", async () => {

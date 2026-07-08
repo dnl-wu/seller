@@ -34,6 +34,39 @@ describe("keywordItemAttributeExtractor", () => {
     expect(patch).toMatchObject({ condition: "like_new" });
   });
 
+  it("maps used condition language to supported condition values", async () => {
+    await expect(
+      keywordItemAttributeExtractor.extract({
+        latestMessage: "used",
+        currentAttributes: {},
+        recentMessages: [],
+      }),
+    ).resolves.toMatchObject({ condition: "fair" });
+
+    await expect(
+      keywordItemAttributeExtractor.extract({
+        latestMessage: "very used",
+        currentAttributes: {},
+        recentMessages: [],
+      }),
+    ).resolves.toMatchObject({ condition: "poor" });
+  });
+
+  it("recognizes common clothing, brand, and size aliases", async () => {
+    await expect(
+      keywordItemAttributeExtractor.extract({
+        latestMessage: "Patagonia fleece, extra large, excellent condition",
+        currentAttributes: {},
+        recentMessages: [],
+      }),
+    ).resolves.toMatchObject({
+      category: "clothing",
+      brand: "patagonia",
+      size: "XL",
+      condition: "like_new",
+    });
+  });
+
   it("returns an empty patch when nothing recognizable is present", async () => {
     const patch = await keywordItemAttributeExtractor.extract({
       latestMessage: "hello there",

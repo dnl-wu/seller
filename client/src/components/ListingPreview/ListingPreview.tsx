@@ -11,6 +11,7 @@ import { formatPrice } from "../../utils/itemAttributes.js";
 interface ListingActionResult {
   ok: boolean;
   error?: string;
+  conflict?: boolean;
 }
 
 interface ListingPreviewProps {
@@ -21,6 +22,7 @@ interface ListingPreviewProps {
   isUpdating: boolean;
   onApproveListing: () => Promise<ListingActionResult>;
   onUpdateListing: (input: UpdateListingRequest) => Promise<ListingActionResult>;
+  onReloadLatest: () => Promise<void>;
 }
 
 function readDraftCurrency(listingDraft: ListingDraft | null): Currency {
@@ -35,6 +37,7 @@ export function ListingPreview({
   isUpdating,
   onApproveListing,
   onUpdateListing,
+  onReloadLatest,
 }: ListingPreviewProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [title, setTitle] = useState(listingDraft?.title ?? "");
@@ -44,6 +47,7 @@ export function ListingPreview({
   );
   const [currency, setCurrency] = useState<Currency>(readDraftCurrency(listingDraft));
   const [inlineError, setInlineError] = useState<string | null>(null);
+  const [showReloadLatest, setShowReloadLatest] = useState(false);
 
   useEffect(() => {
     if (!listingDraft || isEditing) return;
@@ -52,6 +56,7 @@ export function ListingPreview({
     setSuggestedPrice(String(listingDraft.suggestedPrice));
     setCurrency(listingDraft.currency);
     setInlineError(null);
+    setShowReloadLatest(false);
   }, [isEditing, listingDraft]);
 
   useEffect(() => {
@@ -87,6 +92,7 @@ export function ListingPreview({
     setSuggestedPrice(String(listingDraft.suggestedPrice));
     setCurrency(listingDraft.currency);
     setInlineError(null);
+    setShowReloadLatest(false);
   };
 
   const validateForm = (): UpdateListingRequest | null => {
@@ -113,6 +119,7 @@ export function ListingPreview({
       description: trimmedDescription,
       suggestedPrice: price,
       currency,
+      expectedVersion: listingDraft.version,
     };
   };
 
@@ -124,17 +131,28 @@ export function ListingPreview({
     const result = await onUpdateListing(payload);
     if (result.ok) {
       setIsEditing(false);
+      setShowReloadLatest(false);
       return;
     }
     setInlineError(result.error ?? "We couldn't save your listing changes.");
+    setShowReloadLatest(Boolean(result.conflict));
   };
 
   const handleApprove = async () => {
     setInlineError(null);
+    setShowReloadLatest(false);
     const result = await onApproveListing();
     if (!result.ok) {
       setInlineError(result.error ?? "We couldn't approve this listing.");
+      setShowReloadLatest(Boolean(result.conflict));
     }
+  };
+
+  const handleReloadLatest = async () => {
+    await onReloadLatest();
+    setShowReloadLatest(false);
+    setInlineError(null);
+    setIsEditing(false);
   };
 
   return (
@@ -237,6 +255,15 @@ export function ListingPreview({
         <p role="alert" className="mt-4 text-sm font-medium text-secondary-accent">
           {inlineError}
         </p>
+      )}
+      {showReloadLatest && (
+        <button
+          type="button"
+          onClick={() => void handleReloadLatest()}
+          className="mt-3 rounded-md border border-border bg-surface px-3 py-2 text-sm font-semibold text-secondary-text transition-colors hover:text-primary-text"
+        >
+          Reload latest version
+        </button>
       )}
 
       {!isApproved && (

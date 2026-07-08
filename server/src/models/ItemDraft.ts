@@ -1,10 +1,12 @@
 import { Schema, model, type HydratedDocument, type Types } from "mongoose";
 import { ItemAttributesSchema, type ItemAttributes } from "@seller/shared";
+import { ConcurrencyConflictError, versionPredicate } from "../concurrency/errors.js";
 
 export interface ItemDraftAttrs {
   conversationId: Types.ObjectId;
   attributes: ItemAttributes;
   missingFields: string[];
+  version: number;
 }
 
 const itemDraftSchema = new Schema<ItemDraftAttrs>(
@@ -17,6 +19,7 @@ const itemDraftSchema = new Schema<ItemDraftAttrs>(
     },
     attributes: { type: Schema.Types.Mixed, default: {} },
     missingFields: { type: [String], default: [] },
+    version: { type: Number, required: true, default: 0 },
   },
   { timestamps: true },
 );
@@ -35,7 +38,7 @@ export async function createItemDraft(
   attributes: ItemAttributes,
   missingFields: string[],
 ): Promise<ItemDraftDocument> {
-  const doc = await ItemDraftModel.create({ conversationId, attributes, missingFields });
+  const doc = await ItemDraftModel.create({ conversationId, attributes, missingFields, version: 0 });
   return doc as ItemDraftDocument;
 }
 
@@ -51,8 +54,19 @@ export async function updateItemDraft(
   attributes: ItemAttributes,
   missingFields: string[],
 ): Promise<ItemDraftDocument> {
-  draft.attributes = ItemAttributesSchema.parse(attributes);
-  draft.missingFields = missingFields;
-  const saved = await draft.save();
-  return saved as ItemDraftDocument;
+  const doc = await ItemDraftModel.findOneAndUpdate(
+    { _id: draft._id, ...versionPredicate(draft.version ?? 0) },
+    {
+      $set: {
+        attributes: ItemAttributesSchema.parse(attributes),
+        missingFields,
+      },
+      $inc: { version: 1 },
+    },
+    { new: true, runValidators: true },
+  );
+  if (!doc) {
+    throw new ConcurrencyConflictError("CONCURRENCY_CONFLICT");
+  }
+  return doc as ItemDraftDocument;
 }

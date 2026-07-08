@@ -5,9 +5,11 @@ import {
   PostMessageRequestSchema,
   PostMessageResponseSchema,
   UpdateListingRequestSchema,
+  ApproveListingRequestSchema,
   type CreateConversationResponse,
   type GetConversationResponse,
   type PostMessageResponse,
+  type ApproveListingRequest,
   type UpdateListingRequest,
 } from "@seller/shared";
 import type { ZodType } from "zod";
@@ -32,13 +34,27 @@ export class ApiError extends Error {
 }
 
 interface ErrorBody {
-  error?: string;
+  error?: string | { code?: string; message?: string };
 }
 
 function readErrorMessage(body: unknown): string | undefined {
   if (body && typeof body === "object" && "error" in body) {
     const value = (body as ErrorBody).error;
-    return typeof value === "string" ? value : undefined;
+    if (typeof value === "string") return value;
+    return typeof value?.message === "string" ? value.message : undefined;
+  }
+  return undefined;
+}
+
+function readErrorCode(body: unknown): string | undefined {
+  if (body && typeof body === "object") {
+    const topLevelCode = (body as { code?: unknown }).code;
+    if (typeof topLevelCode === "string") return topLevelCode;
+
+    const value = (body as ErrorBody).error;
+    if (value && typeof value === "object" && typeof value.code === "string") {
+      return value.code;
+    }
   }
   return undefined;
 }
@@ -69,6 +85,7 @@ async function request<T>(
     throw new ApiError(
       readErrorMessage(body) ?? "The server returned an error.",
       response.status,
+      readErrorCode(body),
     );
   }
 
@@ -125,10 +142,14 @@ export function updateListing(
   );
 }
 
-export function approveListing(conversationId: string): Promise<GetConversationResponse> {
+export function approveListing(
+  conversationId: string,
+  input: ApproveListingRequest,
+): Promise<GetConversationResponse> {
+  const payload = ApproveListingRequestSchema.parse(input);
   return request(
     `/api/conversations/${conversationId}/listing/approve`,
-    { method: "POST" },
+    { method: "POST", body: JSON.stringify(payload) },
     GetConversationResponseSchema,
   );
 }

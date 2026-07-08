@@ -96,6 +96,16 @@ export function toUiError(err: unknown, context: ErrorContext): UiError {
       };
     }
     if (err.status === 409) {
+      if (
+        err.code === "STALE_LISTING_VERSION" ||
+        err.code === "STALE_CONVERSATION_VERSION" ||
+        err.code === "CONCURRENCY_CONFLICT"
+      ) {
+        return {
+          message: err.message,
+          retryable: true,
+        };
+      }
       return {
         message: conflictMessage(context),
         retryable: false,

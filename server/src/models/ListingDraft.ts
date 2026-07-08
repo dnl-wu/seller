@@ -6,6 +6,7 @@ import {
   type Currency,
   type UpdateListingRequest,
 } from "@seller/shared";
+import { ConcurrencyConflictError, versionPredicate } from "../concurrency/errors.js";
 
 export interface ListingDraftAttrs {
   conversationId: Types.ObjectId;
@@ -15,6 +16,7 @@ export interface ListingDraftAttrs {
   suggestedPrice: number;
   currency: Currency;
   status: ListingDraftStatus;
+  version: number;
 }
 
 const listingDraftSchema = new Schema<ListingDraftAttrs>(
@@ -36,6 +38,7 @@ const listingDraftSchema = new Schema<ListingDraftAttrs>(
       required: true,
       default: "generated",
     },
+    version: { type: Number, required: true, default: 0 },
   },
   { timestamps: true },
 );
@@ -62,6 +65,7 @@ export async function createListingDraft(
     itemDraftId,
     ...listing,
     status: "generated",
+    version: 0,
   });
   return doc as ListingDraftDocument;
 }
@@ -77,21 +81,29 @@ export async function updateGeneratedListingDraft(
   conversationId: string,
   input: UpdateListingRequest,
 ): Promise<ListingDraftDocument | null> {
+  const { expectedVersion, ...updates } = input;
   const doc = await ListingDraftModel.findOneAndUpdate(
-    { conversationId, status: "generated" },
-    { $set: input },
+    { conversationId, status: "generated", ...versionPredicate(expectedVersion) },
+    { $set: updates, $inc: { version: 1 } },
     { new: true, runValidators: true },
   );
+  if (!doc) {
+    throw new ConcurrencyConflictError("STALE_LISTING_VERSION");
+  }
   return doc as ListingDraftDocument | null;
 }
 
 export async function approveGeneratedListingDraft(
   conversationId: string,
+  expectedVersion: number,
 ): Promise<ListingDraftDocument | null> {
   const doc = await ListingDraftModel.findOneAndUpdate(
-    { conversationId, status: "generated" },
-    { $set: { status: "approved" } },
+    { conversationId, status: "generated", ...versionPredicate(expectedVersion) },
+    { $set: { status: "approved" }, $inc: { version: 1 } },
     { new: true, runValidators: true },
   );
+  if (!doc) {
+    throw new ConcurrencyConflictError("STALE_LISTING_VERSION");
+  }
   return doc as ListingDraftDocument | null;
 }

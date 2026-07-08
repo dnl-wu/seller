@@ -54,6 +54,7 @@ export const env = {
     apiKey: llmApiKey,
     model: llmModel,
     timeoutMs: llmTimeoutMs,
+    isConfigured: Boolean(llmApiKey && llmModel && data.AZURE_OPENAI_ENDPOINT),
   },
   azureOpenAi: {
     apiKey: llmApiKey,

@@ -2,9 +2,12 @@ import { randomUUID } from "node:crypto";
 import {
   GeneratedListingSchema,
   ItemAttributesSchema,
+  type ApproveListingRequest,
   type UpdateListingRequest,
 } from "@seller/shared";
 import type { AiErrorCode } from "../ai/errors.js";
+import { ConcurrencyConflictError } from "../concurrency/errors.js";
+import { conversationExecutionCoordinator } from "./conversationExecutionCoordinator.js";
 import {
   createConversation as createConversationRecord,
   findConversationById,
@@ -119,6 +122,7 @@ export type ListingMutationResult =
   | { kind: "not_found" }
   | { kind: "listing_not_found"; conversation: ConversationDocument }
   | { kind: "invalid_state"; conversation: ConversationDocument }
+  | { kind: "concurrency_conflict"; code: "CONCURRENCY_CONFLICT" | "STALE_LISTING_VERSION" | "STALE_CONVERSATION_VERSION" }
   | {
       kind: "not_editable";
       conversation: ConversationDocument;
@@ -128,6 +132,15 @@ export type ListingMutationResult =
   | { kind: "inconsistent_state"; detail: ConversationDetail };
 
 export async function updateListing(
+  conversationId: string,
+  input: UpdateListingRequest,
+): Promise<ListingMutationResult> {
+  return conversationExecutionCoordinator.runExclusive(conversationId, () =>
+    updateListingInner(conversationId, input),
+  );
+}
+
+async function updateListingInner(
   conversationId: string,
   input: UpdateListingRequest,
 ): Promise<ListingMutationResult> {
@@ -145,7 +158,15 @@ export async function updateListing(
     return { kind: "not_editable", conversation, listingDraft };
   }
 
-  const updatedListingDraft = await updateGeneratedListingDraft(conversationId, input);
+  let updatedListingDraft: ListingDraftDocument | null;
+  try {
+    updatedListingDraft = await updateGeneratedListingDraft(conversationId, input);
+  } catch (err) {
+    if (err instanceof ConcurrencyConflictError) {
+      return { kind: "concurrency_conflict", code: err.code };
+    }
+    throw err;
+  }
   if (!updatedListingDraft) {
     const latestListingDraft = await findListingDraftByConversation(conversationId);
     if (!latestListingDraft) return { kind: "listing_not_found", conversation };
@@ -160,12 +181,19 @@ export async function updateListing(
 
 async function approveDraftReadyConversation(
   conversationId: string,
+  expectedConversation?: ConversationDocument,
 ): Promise<ListingMutationResult> {
-  const approvedConversation = await transitionConversationState(
-    conversationId,
-    "draft_ready",
-    "approved",
-  );
+  let approvedConversation: ConversationDocument | null = null;
+  try {
+    approvedConversation = expectedConversation
+      ? await updateConversationState(expectedConversation, "approved")
+      : await transitionConversationState(conversationId, "draft_ready", "approved");
+  } catch (err) {
+    if (err instanceof ConcurrencyConflictError) {
+      return { kind: "concurrency_conflict", code: err.code };
+    }
+    throw err;
+  }
 
   if (approvedConversation) {
     return {
@@ -198,6 +226,16 @@ async function approveDraftReadyConversation(
 
 export async function approveListing(
   conversationId: string,
+  input: ApproveListingRequest,
+): Promise<ListingMutationResult> {
+  return conversationExecutionCoordinator.runExclusive(conversationId, () =>
+    approveListingInner(conversationId, input),
+  );
+}
+
+async function approveListingInner(
+  conversationId: string,
+  input: ApproveListingRequest,
 ): Promise<ListingMutationResult> {
   const conversation = await findConversationById(conversationId);
   if (!conversation) return { kind: "not_found" };
@@ -214,6 +252,20 @@ export async function approveListing(
 
   if (conversation.state !== "draft_ready") {
     return { kind: "invalid_state", conversation };
+  }
+
+  if (
+    listingDraft.status === "generated" &&
+    (listingDraft.version ?? 0) !== input.expectedListingVersion
+  ) {
+    return { kind: "concurrency_conflict", code: "STALE_LISTING_VERSION" };
+  }
+
+  if (
+    input.expectedConversationVersion !== undefined &&
+    (conversation.version ?? 0) !== input.expectedConversationVersion
+  ) {
+    return { kind: "concurrency_conflict", code: "STALE_CONVERSATION_VERSION" };
   }
 
   try {
@@ -236,7 +288,18 @@ export async function approveListing(
   // (blocking later edits), then transition the conversation with a state
   // guard. If the second write fails, the next approval request repairs the
   // only expected partial state: listing approved, conversation draft_ready.
-  const approvedListingDraft = await approveGeneratedListingDraft(conversationId);
+  let approvedListingDraft: ListingDraftDocument | null;
+  try {
+    approvedListingDraft = await approveGeneratedListingDraft(
+      conversationId,
+      input.expectedListingVersion,
+    );
+  } catch (err) {
+    if (err instanceof ConcurrencyConflictError) {
+      return { kind: "concurrency_conflict", code: err.code };
+    }
+    throw err;
+  }
   if (!approvedListingDraft) {
     const latestListingDraft = await findListingDraftByConversation(conversationId);
     if (!latestListingDraft) return { kind: "listing_not_found", conversation };
@@ -245,7 +308,7 @@ export async function approveListing(
     }
   }
 
-  return approveDraftReadyConversation(conversationId);
+  return approveDraftReadyConversation(conversationId, conversation);
 }
 
 export type ExtractionFailureReason = AiErrorCode;
@@ -268,9 +331,30 @@ function listingFailureReason(err: unknown): ListingFailureReason {
   return "AI_UNKNOWN";
 }
 
+function isDuplicateKeyError(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && (err as { code?: unknown }).code === 11000);
+}
+
+async function duplicateMessageResult(
+  conversation: ConversationDocument,
+  conversationId: string,
+): Promise<Extract<PostMessageResult, { kind: "duplicate" }>> {
+  const [itemDraft, assistantMessage, listingDraft] = await Promise.all([
+    findItemDraftByConversation(conversationId),
+    findLatestAssistantMessage(conversationId),
+    findListingDraftByConversation(conversationId),
+  ]);
+  return { kind: "duplicate", conversation, itemDraft, assistantMessage, listingDraft };
+}
+
 export type PostMessageResult =
   | { kind: "not_found" }
   | { kind: "invalid_state"; conversation: ConversationDocument }
+  | {
+      kind: "concurrency_conflict";
+      conversation: ConversationDocument;
+      code: "CONCURRENCY_CONFLICT" | "STALE_CONVERSATION_VERSION" | "STALE_LISTING_VERSION";
+    }
   | {
       kind: "duplicate";
       conversation: ConversationDocument;
@@ -304,6 +388,18 @@ export async function postSellerMessage(
   extractor: ItemAttributeExtractor = getItemAttributeExtractor(),
   listingGenerator: ListingGenerator = getListingGenerator(),
 ): Promise<PostMessageResult> {
+  return conversationExecutionCoordinator.runExclusive(conversationId, () =>
+    postSellerMessageInner(conversationId, content, clientMessageId, extractor, listingGenerator),
+  );
+}
+
+async function postSellerMessageInner(
+  conversationId: string,
+  content: string,
+  clientMessageId: string,
+  extractor: ItemAttributeExtractor,
+  listingGenerator: ListingGenerator,
+): Promise<PostMessageResult> {
   const conversation = await findConversationById(conversationId);
   if (!conversation) {
     return { kind: "not_found" };
@@ -313,12 +409,7 @@ export async function postSellerMessage(
   // regardless of what state the conversation has since moved to.
   const existingMessage = await findMessageByClientId(conversationId, clientMessageId);
   if (existingMessage) {
-    const [itemDraft, assistantMessage, listingDraft] = await Promise.all([
-      findItemDraftByConversation(conversationId),
-      findLatestAssistantMessage(conversationId),
-      findListingDraftByConversation(conversationId),
-    ]);
-    return { kind: "duplicate", conversation, itemDraft, assistantMessage, listingDraft };
+    return duplicateMessageResult(conversation, conversationId);
   }
 
   // This deterministic flow only knows how to collect item facts; once the
@@ -366,11 +457,26 @@ export async function postSellerMessage(
   // data — a failed extraction leaves no trace, so resubmitting the same
   // clientMessageId after a transient failure is processed fresh rather
   // than short-circuited by the duplicate check above.
-  await createMessage({ conversationId, role: "seller", content, clientMessageId });
+  try {
+    await createMessage({ conversationId, role: "seller", content, clientMessageId });
+  } catch (err) {
+    if (isDuplicateKeyError(err)) {
+      return duplicateMessageResult(conversation, conversationId);
+    }
+    throw err;
+  }
 
   const mergedAttributes = mergeAttributes(itemDraft.attributes, patchResult.data);
   const missingFields = computeMissingFields(mergedAttributes);
-  const updatedDraft = await updateItemDraft(itemDraft, mergedAttributes, missingFields);
+  let updatedDraft: ItemDraftDocument;
+  try {
+    updatedDraft = await updateItemDraft(itemDraft, mergedAttributes, missingFields);
+  } catch (err) {
+    if (err instanceof ConcurrencyConflictError) {
+      return { kind: "concurrency_conflict", conversation, code: err.code };
+    }
+    throw err;
+  }
 
   if (missingFields.length > 0) {
     const nextField = pickNextMissingField(missingFields);
@@ -400,9 +506,17 @@ export async function postSellerMessage(
   // back to ready_to_generate (see the catch block) rather than leaving it
   // stuck in `generating` or with a partially-written listing.
   assertTransition(conversation.state, "ready_to_generate");
-  let workingConversation = await updateConversationState(conversation, "ready_to_generate");
-  assertTransition(workingConversation.state, "generating");
-  workingConversation = await updateConversationState(workingConversation, "generating");
+  let workingConversation: ConversationDocument;
+  try {
+    workingConversation = await updateConversationState(conversation, "ready_to_generate");
+    assertTransition(workingConversation.state, "generating");
+    workingConversation = await updateConversationState(workingConversation, "generating");
+  } catch (err) {
+    if (err instanceof ConcurrencyConflictError) {
+      return { kind: "concurrency_conflict", conversation, code: err.code };
+    }
+    throw err;
+  }
 
   try {
     const preferences = await getSellerPreferences(conversation.sellerId);
@@ -417,11 +531,33 @@ export async function postSellerMessage(
     }
     validateListingClaims(listingResult.data, mergedAttributes);
 
-    const listingDraft = await createListingDraft(
-      conversationId,
-      updatedDraft._id.toString(),
-      listingResult.data,
-    );
+    let listingDraft: ListingDraftDocument;
+    try {
+      listingDraft = await createListingDraft(
+        conversationId,
+        updatedDraft._id.toString(),
+        listingResult.data,
+      );
+    } catch (err) {
+      if (isDuplicateKeyError(err)) {
+        const existingListing = await findListingDraftByConversation(conversationId);
+        if (existingListing) {
+          return {
+            kind: "ok",
+            conversation: workingConversation,
+            itemDraft: updatedDraft,
+            assistantMessage: await createMessage({
+              conversationId,
+              role: "assistant",
+              content: "Your listing draft is ready for review.",
+              clientMessageId: `assistant-${randomUUID()}`,
+            }),
+            listingDraft: existingListing,
+          };
+        }
+      }
+      throw err;
+    }
 
     assertTransition(workingConversation.state, "draft_ready");
     workingConversation = await updateConversationState(workingConversation, "draft_ready");
@@ -441,6 +577,9 @@ export async function postSellerMessage(
       listingDraft,
     };
   } catch (err) {
+    if (err instanceof ConcurrencyConflictError) {
+      return { kind: "concurrency_conflict", conversation: workingConversation, code: err.code };
+    }
     // No partial ListingDraft exists (createListingDraft only runs after
     // schema + claims validation succeed), so the item facts are
     // untouched. Roll back to ready_to_generate — the direct predecessor

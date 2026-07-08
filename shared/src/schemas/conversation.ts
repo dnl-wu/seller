@@ -8,6 +8,7 @@ export const ConversationSchema = z.object({
   id: z.string().min(1),
   sellerId: z.string().min(1),
   state: ConversationStateSchema,
+  version: z.number().int().nonnegative(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });

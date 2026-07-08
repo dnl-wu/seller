@@ -6,6 +6,7 @@ export const ItemDraftSchema = z.object({
   conversationId: z.string().min(1),
   attributes: ItemAttributesSchema,
   missingFields: z.array(z.string()),
+  version: z.number().int().nonnegative(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 });

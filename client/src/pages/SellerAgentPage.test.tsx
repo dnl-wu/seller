@@ -64,7 +64,7 @@ function mockFreshConversation() {
 async function renderAndWaitForInit() {
   render(<SellerAgentPage />);
   await waitFor(() => expect(createConversation).toHaveBeenCalled());
-  await screen.findByText(/create your listing/i);
+  await screen.findByText(/list anything/i);
 }
 
 describe("SellerAgentPage", () => {
@@ -275,7 +275,7 @@ describe("SellerAgentPage", () => {
 
     await waitFor(() => expect(createConversation).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(await screen.findByText(/create your listing/i)).toBeInTheDocument();
+    expect(await screen.findByText(/list anything/i)).toBeInTheDocument();
   });
 
   it("opens seller preferences from the header without resetting the conversation", async () => {
@@ -377,7 +377,7 @@ describe("SellerAgentPage", () => {
     await waitFor(() =>
       expect(updateListing).toHaveBeenCalledWith(
         "conv-1",
-        expect.objectContaining({ title: "Edited Jacket", suggestedPrice: 55 }),
+        expect.objectContaining({ title: "Edited Jacket", suggestedPrice: 55, expectedVersion: 0 }),
       ),
     );
     expect(await screen.findByText("Edited Jacket")).toBeInTheDocument();
@@ -429,7 +429,12 @@ describe("SellerAgentPage", () => {
     await user.click(screen.getByRole("button", { name: /send message/i }));
     await user.click(await screen.findByRole("button", { name: /approve listing/i }));
 
-    await waitFor(() => expect(approveListing).toHaveBeenCalledWith("conv-1"));
+    await waitFor(() =>
+      expect(approveListing).toHaveBeenCalledWith("conv-1", {
+        expectedListingVersion: 0,
+        expectedConversationVersion: 0,
+      }),
+    );
     expect(await screen.findByText("Listing approved")).toBeInTheDocument();
     expect(screen.getByText("Your final draft has been saved.")).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: /message/i })).toBeDisabled();
