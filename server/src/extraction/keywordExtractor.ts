@@ -1,12 +1,13 @@
 import type { ItemAttributes, ItemCondition } from "@seller/shared";
-import type { ItemAttributeExtractor } from "./types.js";
+import type { ExtractionInput, ItemAttributeDelta, ItemAttributeExtractor } from "./types.js";
 
 /**
  * Deterministic, keyword-based stand-in for real extraction. This is NOT
  * an NLP model and does not understand language — it is a small,
  * fixed-vocabulary parser scoped to the "clothing" demo flow, isolated
- * behind ItemAttributeExtractor so it can be replaced by an LLM-backed
- * implementation later without touching the FSM or service layer.
+ * behind ItemAttributeExtractor so it can be swapped for LlmItemAttributeExtractor
+ * without touching the FSM or service layer. Used as the default in tests
+ * and as a no-AI-configured fallback (ATTRIBUTE_EXTRACTOR=keyword).
  */
 
 const CLOTHING_KEYWORDS = [
@@ -73,11 +74,11 @@ function findWordKeyword(haystack: string, keywords: string[]): string | undefin
   return keywords.find((keyword) => includesWord(haystack, keyword));
 }
 
-export const keywordItemAttributeExtractor: ItemAttributeExtractor = {
-  extract(message): Partial<ItemAttributes> {
+export class KeywordItemAttributeExtractor implements ItemAttributeExtractor {
+  async extract(input: ExtractionInput): Promise<ItemAttributeDelta> {
     // Strip apostrophes so contractions like "it's" don't create a false
     // word-boundary match for single-letter size tokens (the "s" in "it's").
-    const text = message.toLowerCase().replace(/['’]/g, "");
+    const text = input.message.toLowerCase().replace(/['’]/g, "");
     const patch: Partial<ItemAttributes> = {};
 
     if (findWordKeyword(text, CLOTHING_KEYWORDS)) {
@@ -105,5 +106,7 @@ export const keywordItemAttributeExtractor: ItemAttributeExtractor = {
     }
 
     return patch;
-  },
-};
+  }
+}
+
+export const keywordItemAttributeExtractor = new KeywordItemAttributeExtractor();

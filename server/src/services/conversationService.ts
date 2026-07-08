@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ItemAttributes } from "@seller/shared";
+import { ItemAttributesSchema } from "@seller/shared";
 import {
   createConversation as createConversationRecord,
   findConversationById,
@@ -10,6 +10,7 @@ import {
   createMessage,
   findMessageByClientId,
   findMessagesByConversation,
+  findRecentMessages,
   findLatestAssistantMessage,
   type MessageDocument,
 } from "../models/Message.js";
@@ -26,8 +27,12 @@ import {
   assertTransition,
 } from "../fsm/conversationFsm.js";
 import { mergeAttributes } from "../fsm/mergeAttributes.js";
-import { keywordItemAttributeExtractor } from "../extraction/keywordExtractor.js";
+import { getItemAttributeExtractor } from "../extraction/createExtractor.js";
+import { sanitizeRawDelta } from "../extraction/sanitizeDelta.js";
+import { ExtractionValidationError } from "../extraction/errors.js";
 import type { ItemAttributeExtractor } from "../extraction/types.js";
+
+const RECENT_MESSAGES_WINDOW = 6;
 
 export interface CreatedConversation {
   conversation: ConversationDocument;
@@ -38,7 +43,7 @@ export async function createConversation(
   sellerId: string,
 ): Promise<CreatedConversation> {
   const conversation = await createConversationRecord(sellerId);
-  const emptyAttributes: ItemAttributes = {};
+  const emptyAttributes = {};
   const missingFields = computeMissingFields(emptyAttributes);
   const itemDraft = await createItemDraft(
     conversation._id.toString(),
@@ -68,6 +73,8 @@ export async function getConversationById(
   return { conversation, itemDraft, messages };
 }
 
+export type ExtractionFailureReason = "provider_error" | "invalid_response" | "schema_invalid";
+
 export type PostMessageResult =
   | { kind: "not_found" }
   | { kind: "invalid_state"; conversation: ConversationDocument }
@@ -76,6 +83,11 @@ export type PostMessageResult =
       conversation: ConversationDocument;
       itemDraft: ItemDraftDocument | null;
       assistantMessage: MessageDocument | null;
+    }
+  | {
+      kind: "extraction_failed";
+      conversation: ConversationDocument;
+      reason: ExtractionFailureReason;
     }
   | {
       kind: "ok";
@@ -88,7 +100,7 @@ export async function postSellerMessage(
   conversationId: string,
   content: string,
   clientMessageId: string,
-  extractor: ItemAttributeExtractor = keywordItemAttributeExtractor,
+  extractor: ItemAttributeExtractor = getItemAttributeExtractor(),
 ): Promise<PostMessageResult> {
   const conversation = await findConversationById(conversationId);
   if (!conversation) {
@@ -113,15 +125,48 @@ export async function postSellerMessage(
     return { kind: "invalid_state", conversation };
   }
 
-  await createMessage({ conversationId, role: "seller", content, clientMessageId });
-
   const itemDraft = await findItemDraftByConversation(conversationId);
   if (!itemDraft) {
     throw new Error(`Item draft missing for conversation ${conversationId}`);
   }
 
-  const patch = extractor.extract(content, itemDraft.attributes);
-  const mergedAttributes = mergeAttributes(itemDraft.attributes, patch);
+  // A small bounded window of recent messages, not the full transcript —
+  // enough for the extractor to resolve things like "actually it's a medium"
+  // without every request growing with conversation length.
+  const recentMessages = await findRecentMessages(conversationId, RECENT_MESSAGES_WINDOW);
+
+  let rawDelta: unknown;
+  try {
+    rawDelta = await extractor.extract({
+      message: content,
+      currentAttributes: itemDraft.attributes,
+      recentMessages: recentMessages.map((m) => ({ role: m.role, content: m.content })),
+    });
+  } catch (err) {
+    return {
+      kind: "extraction_failed",
+      conversation,
+      reason: err instanceof ExtractionValidationError ? "invalid_response" : "provider_error",
+    };
+  }
+
+  // Applied uniformly regardless of which extractor produced the delta:
+  // null/empty "I don't know" values are dropped rather than failing the
+  // whole extraction, and unrecognized invented fields are silently
+  // stripped by the schema (zod drops unknown object keys by default)
+  // rather than being stored.
+  const patchResult = ItemAttributesSchema.safeParse(sanitizeRawDelta(rawDelta));
+  if (!patchResult.success) {
+    return { kind: "extraction_failed", conversation, reason: "schema_invalid" };
+  }
+
+  // Only persist the seller message once extraction has produced valid
+  // data — a failed extraction leaves no trace, so resubmitting the same
+  // clientMessageId after a transient failure is processed fresh rather
+  // than short-circuited by the duplicate check above.
+  await createMessage({ conversationId, role: "seller", content, clientMessageId });
+
+  const mergedAttributes = mergeAttributes(itemDraft.attributes, patchResult.data);
   const missingFields = computeMissingFields(mergedAttributes);
   const updatedDraft = await updateItemDraft(itemDraft, mergedAttributes, missingFields);
 

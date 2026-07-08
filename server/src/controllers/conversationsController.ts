@@ -75,6 +75,15 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
         error: `Cannot accept new messages while conversation is in state "${result.conversation.state}"`,
       });
       return;
+    case "extraction_failed": {
+      const messages: Record<typeof result.reason, string> = {
+        provider_error: "Attribute extraction is temporarily unavailable. Please try again.",
+        invalid_response: "Attribute extraction returned an unusable response. Please try again.",
+        schema_invalid: "Attribute extraction returned invalid data. Please try again.",
+      };
+      res.status(502).json({ error: messages[result.reason] });
+      return;
+    }
     case "duplicate":
       res.status(200).json({
         conversation: serializeConversation(result.conversation),

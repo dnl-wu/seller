@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ItemAttributes } from "@seller/shared";
+import { ExtractionProviderError, ExtractionValidationError } from "../extraction/errors.js";
+import type { ItemAttributeExtractor } from "../extraction/types.js";
 
 vi.mock("../models/Conversation.js", () => ({
   createConversation: vi.fn(),
@@ -10,6 +12,7 @@ vi.mock("../models/Message.js", () => ({
   createMessage: vi.fn(),
   findMessageByClientId: vi.fn(),
   findMessagesByConversation: vi.fn(),
+  findRecentMessages: vi.fn(),
   findLatestAssistantMessage: vi.fn(),
 }));
 vi.mock("../models/ItemDraft.js", () => ({
@@ -27,6 +30,7 @@ import {
   createMessage,
   findMessageByClientId,
   findMessagesByConversation,
+  findRecentMessages,
   findLatestAssistantMessage,
 } from "../models/Message.js";
 import {
@@ -92,8 +96,24 @@ function makeMessageDoc(overrides: {
   return doc as unknown as Awaited<ReturnType<typeof findMessageByClientId>>;
 }
 
+function fakeExtractor(extract: ItemAttributeExtractor["extract"]): ItemAttributeExtractor {
+  return { extract };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(findRecentMessages).mockResolvedValue([]);
+  vi.mocked(createMessage).mockImplementation(async (input) =>
+    makeMessageDoc({
+      role: input.role,
+      content: input.content,
+      clientMessageId: input.clientMessageId,
+      conversationId: input.conversationId,
+    })!,
+  );
+  vi.mocked(updateItemDraft).mockImplementation(async (_draft, attributes, missingFields) =>
+    makeItemDraftDoc({ attributes, missingFields })!,
+  );
 });
 
 describe("createConversation", () => {
@@ -156,31 +176,21 @@ describe("postSellerMessage", () => {
 
   it("stores the seller message and asks about the next missing field for partial info", async () => {
     const conversationDoc = makeConversationDoc();
-    const itemDraftDoc = makeItemDraftDoc({ attributes: {}, missingFields: [
-      "category",
-      "condition",
-      "size",
-      "brand",
-    ] });
+    const itemDraftDoc = makeItemDraftDoc({
+      attributes: {},
+      missingFields: ["category", "condition", "size", "brand"],
+    });
     vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
     vi.mocked(findMessageByClientId).mockResolvedValue(null);
-    vi.mocked(createMessage).mockImplementation(async (input) =>
-      makeMessageDoc({
-        role: input.role,
-        content: input.content,
-        clientMessageId: input.clientMessageId,
-        conversationId: input.conversationId,
-      })!,
-    );
     vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
-    vi.mocked(updateItemDraft).mockImplementation(async (_draft, attributes, missingFields) =>
-      makeItemDraftDoc({ attributes, missingFields })!,
-    );
+
+    const extractor = fakeExtractor(async () => ({ category: "clothing" }));
 
     const result = await postSellerMessage(
       "conv1",
       "I want to sell a black jacket",
       "client-1",
+      extractor,
     );
 
     expect(result.kind).toBe("ok");
@@ -200,27 +210,156 @@ describe("postSellerMessage", () => {
 
     vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
     vi.mocked(findMessageByClientId).mockResolvedValue(null);
-    vi.mocked(createMessage).mockImplementation(async (input) =>
-      makeMessageDoc({
-        role: input.role,
-        content: input.content,
-        clientMessageId: input.clientMessageId,
-        conversationId: input.conversationId,
-      })!,
-    );
     vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
-    vi.mocked(updateItemDraft).mockImplementation(async (_draft, attributes, missingFields) =>
-      makeItemDraftDoc({ attributes, missingFields })!,
-    );
     vi.mocked(updateConversationState).mockResolvedValue(readyConversationDoc);
 
-    const result = await postSellerMessage("conv1", "It's a Nike jacket", "client-2");
+    const extractor = fakeExtractor(async () => ({ brand: "nike" }));
+
+    const result = await postSellerMessage("conv1", "It's a Nike jacket", "client-2", extractor);
 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") throw new Error("expected ok result");
     expect(updateConversationState).toHaveBeenCalledWith(conversationDoc, "ready_to_generate");
     expect(result.conversation.state).toBe("ready_to_generate");
     expect(result.assistantMessage.content).toMatch(/complete/i);
+  });
+
+  it("applies an explicit correction of an existing value", async () => {
+    const conversationDoc = makeConversationDoc();
+    const itemDraftDoc = makeItemDraftDoc({
+      attributes: { category: "clothing", condition: "good", size: "M", brand: "nike" },
+      missingFields: [],
+    });
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findMessageByClientId).mockResolvedValue(null);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+    vi.mocked(updateConversationState).mockResolvedValue(
+      makeConversationDoc({ state: "ready_to_generate" }),
+    );
+
+    const extractor = fakeExtractor(async () => ({ size: "L" }));
+
+    const result = await postSellerMessage(
+      "conv1",
+      "Actually it's a size L, not M",
+      "client-correction",
+      extractor,
+    );
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok result");
+    expect(result.itemDraft.attributes.size).toBe("L");
+    expect(result.itemDraft.attributes.brand).toBe("nike");
+  });
+
+  it("does not let null-valued fields overwrite existing facts", async () => {
+    const conversationDoc = makeConversationDoc();
+    const itemDraftDoc = makeItemDraftDoc({
+      attributes: { category: "clothing", condition: "good", size: "M", brand: "nike" },
+      missingFields: [],
+    });
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findMessageByClientId).mockResolvedValue(null);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+    vi.mocked(updateConversationState).mockResolvedValue(
+      makeConversationDoc({ state: "ready_to_generate" }),
+    );
+
+    // Simulates a provider that returns an explicit null for a field it
+    // doesn't have new information about, rather than omitting the key.
+    const extractor = fakeExtractor(
+      async () => ({ brand: null }) as unknown as Partial<ItemAttributes>,
+    );
+
+    const result = await postSellerMessage("conv1", "still the same jacket", "client-null", extractor);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok result");
+    expect(result.itemDraft.attributes.brand).toBe("nike");
+  });
+
+  it("returns extraction_failed and leaves the draft untouched for a provider timeout", async () => {
+    const conversationDoc = makeConversationDoc();
+    const itemDraftDoc = makeItemDraftDoc();
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findMessageByClientId).mockResolvedValue(null);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+
+    const extractor = fakeExtractor(async () => {
+      throw new ExtractionProviderError("timed out");
+    });
+
+    const result = await postSellerMessage("conv1", "a jacket", "client-timeout", extractor);
+
+    expect(result).toMatchObject({ kind: "extraction_failed", reason: "provider_error" });
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(updateItemDraft).not.toHaveBeenCalled();
+  });
+
+  it("returns extraction_failed for invalid JSON from the provider", async () => {
+    const conversationDoc = makeConversationDoc();
+    const itemDraftDoc = makeItemDraftDoc();
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findMessageByClientId).mockResolvedValue(null);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+
+    const extractor = fakeExtractor(async () => {
+      throw new ExtractionValidationError("not valid JSON");
+    });
+
+    const result = await postSellerMessage("conv1", "a jacket", "client-badjson", extractor);
+
+    expect(result).toMatchObject({ kind: "extraction_failed", reason: "invalid_response" });
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns extraction_failed for schema-invalid output", async () => {
+    const conversationDoc = makeConversationDoc();
+    const itemDraftDoc = makeItemDraftDoc();
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findMessageByClientId).mockResolvedValue(null);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+
+    // "used" is not a valid ItemCondition enum value.
+    const extractor = fakeExtractor(
+      async () => ({ condition: "used" }) as unknown as Partial<ItemAttributes>,
+    );
+
+    const result = await postSellerMessage("conv1", "a used jacket", "client-badenum", extractor);
+
+    expect(result).toMatchObject({ kind: "extraction_failed", reason: "schema_invalid" });
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  it("strips unsupported invented fields while keeping valid ones", async () => {
+    const conversationDoc = makeConversationDoc();
+    const itemDraftDoc = makeItemDraftDoc({ attributes: {}, missingFields: [
+      "category",
+      "condition",
+      "size",
+      "brand",
+    ] });
+
+    vi.mocked(findConversationById).mockResolvedValue(conversationDoc);
+    vi.mocked(findMessageByClientId).mockResolvedValue(null);
+    vi.mocked(findItemDraftByConversation).mockResolvedValue(itemDraftDoc!);
+
+    const extractor = fakeExtractor(
+      async () =>
+        ({ category: "clothing", waterResistanceRating: "IPX7" }) as unknown as Partial<ItemAttributes>,
+    );
+
+    const result = await postSellerMessage("conv1", "a jacket", "client-invented", extractor);
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok result");
+    expect(result.itemDraft.attributes).not.toHaveProperty("waterResistanceRating");
+    expect(result.itemDraft.attributes.category).toBe("clothing");
   });
 
   it("returns the existing result for a duplicate clientMessageId without creating a new message", async () => {

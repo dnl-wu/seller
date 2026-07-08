@@ -68,6 +68,16 @@ export async function findMessagesByConversation(
   return docs as MessageDocument[];
 }
 
+export async function findRecentMessages(
+  conversationId: string,
+  limit: number,
+): Promise<MessageDocument[]> {
+  const docs = await MessageModel.find({ conversationId })
+    .sort({ createdAt: -1 })
+    .limit(limit);
+  return (docs as MessageDocument[]).reverse();
+}
+
 export async function findLatestAssistantMessage(
   conversationId: string,
 ): Promise<MessageDocument | null> {
