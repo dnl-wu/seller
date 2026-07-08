@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ItemAttributesSchema } from "@seller/shared";
+import { GeneratedListingSchema, ItemAttributesSchema } from "@seller/shared";
 import {
   createConversation as createConversationRecord,
   findConversationById,
@@ -21,6 +21,11 @@ import {
   type ItemDraftDocument,
 } from "../models/ItemDraft.js";
 import {
+  createListingDraft,
+  findListingDraftByConversation,
+  type ListingDraftDocument,
+} from "../models/ListingDraft.js";
+import {
   computeMissingFields,
   pickNextMissingField,
   questionForField,
@@ -31,6 +36,11 @@ import { getItemAttributeExtractor } from "../extraction/createExtractor.js";
 import { sanitizeRawDelta } from "../extraction/sanitizeDelta.js";
 import { ExtractionValidationError } from "../extraction/errors.js";
 import type { ItemAttributeExtractor } from "../extraction/types.js";
+import { getListingGenerator } from "../listing/createListingGenerator.js";
+import { DEFAULT_LISTING_CURRENCY } from "../listing/constants.js";
+import { validateListingClaims } from "../listing/validateListingClaims.js";
+import { ListingGenerationValidationError } from "../listing/errors.js";
+import type { ListingGenerator } from "../listing/types.js";
 
 const RECENT_MESSAGES_WINDOW = 6;
 
@@ -57,6 +67,7 @@ export interface ConversationDetail {
   conversation: ConversationDocument;
   itemDraft: ItemDraftDocument | null;
   messages: MessageDocument[];
+  listingDraft: ListingDraftDocument | null;
 }
 
 export async function getConversationById(
@@ -65,15 +76,17 @@ export async function getConversationById(
   const conversation = await findConversationById(conversationId);
   if (!conversation) return null;
 
-  const [itemDraft, messages] = await Promise.all([
+  const [itemDraft, messages, listingDraft] = await Promise.all([
     findItemDraftByConversation(conversationId),
     findMessagesByConversation(conversationId),
+    findListingDraftByConversation(conversationId),
   ]);
 
-  return { conversation, itemDraft, messages };
+  return { conversation, itemDraft, messages, listingDraft };
 }
 
 export type ExtractionFailureReason = "provider_error" | "invalid_response" | "schema_invalid";
+export type ListingFailureReason = "provider_error" | "invalid_output";
 
 export type PostMessageResult =
   | { kind: "not_found" }
@@ -83,6 +96,7 @@ export type PostMessageResult =
       conversation: ConversationDocument;
       itemDraft: ItemDraftDocument | null;
       assistantMessage: MessageDocument | null;
+      listingDraft: ListingDraftDocument | null;
     }
   | {
       kind: "extraction_failed";
@@ -90,10 +104,17 @@ export type PostMessageResult =
       reason: ExtractionFailureReason;
     }
   | {
+      kind: "listing_generation_failed";
+      conversation: ConversationDocument;
+      itemDraft: ItemDraftDocument;
+      reason: ListingFailureReason;
+    }
+  | {
       kind: "ok";
       conversation: ConversationDocument;
       itemDraft: ItemDraftDocument;
       assistantMessage: MessageDocument;
+      listingDraft: ListingDraftDocument | null;
     };
 
 export async function postSellerMessage(
@@ -101,6 +122,7 @@ export async function postSellerMessage(
   content: string,
   clientMessageId: string,
   extractor: ItemAttributeExtractor = getItemAttributeExtractor(),
+  listingGenerator: ListingGenerator = getListingGenerator(),
 ): Promise<PostMessageResult> {
   const conversation = await findConversationById(conversationId);
   if (!conversation) {
@@ -111,11 +133,12 @@ export async function postSellerMessage(
   // regardless of what state the conversation has since moved to.
   const existingMessage = await findMessageByClientId(conversationId, clientMessageId);
   if (existingMessage) {
-    const [itemDraft, assistantMessage] = await Promise.all([
+    const [itemDraft, assistantMessage, listingDraft] = await Promise.all([
       findItemDraftByConversation(conversationId),
       findLatestAssistantMessage(conversationId),
+      findListingDraftByConversation(conversationId),
     ]);
-    return { kind: "duplicate", conversation, itemDraft, assistantMessage };
+    return { kind: "duplicate", conversation, itemDraft, assistantMessage, listingDraft };
   }
 
   // This deterministic flow only knows how to collect item facts; once the
@@ -170,31 +193,84 @@ export async function postSellerMessage(
   const missingFields = computeMissingFields(mergedAttributes);
   const updatedDraft = await updateItemDraft(itemDraft, mergedAttributes, missingFields);
 
-  let assistantContent: string;
-  let updatedConversation = conversation;
-
   if (missingFields.length > 0) {
     const nextField = pickNextMissingField(missingFields);
-    assistantContent = nextField
+    const assistantContent = nextField
       ? questionForField(nextField)
       : "Could you tell me more about the item?";
-  } else {
-    assertTransition(conversation.state, "ready_to_generate");
-    updatedConversation = await updateConversationState(conversation, "ready_to_generate");
-    assistantContent = "Thanks! I have everything I need — your item information is complete.";
+
+    const assistantMessage = await createMessage({
+      conversationId,
+      role: "assistant",
+      content: assistantContent,
+      clientMessageId: `assistant-${randomUUID()}`,
+    });
+
+    return {
+      kind: "ok",
+      conversation,
+      itemDraft: updatedDraft,
+      assistantMessage,
+      listingDraft: null,
+    };
   }
 
-  const assistantMessage = await createMessage({
-    conversationId,
-    role: "assistant",
-    content: assistantContent,
-    clientMessageId: `assistant-${randomUUID()}`,
-  });
+  // All required fields are present: walk the FSM through
+  // ready_to_generate -> generating, call the listing generator, and land
+  // on draft_ready. Any failure past this point rolls the conversation
+  // back to ready_to_generate (see the catch block) rather than leaving it
+  // stuck in `generating` or with a partially-written listing.
+  assertTransition(conversation.state, "ready_to_generate");
+  let workingConversation = await updateConversationState(conversation, "ready_to_generate");
+  assertTransition(workingConversation.state, "generating");
+  workingConversation = await updateConversationState(workingConversation, "generating");
 
-  return {
-    kind: "ok",
-    conversation: updatedConversation,
-    itemDraft: updatedDraft,
-    assistantMessage,
-  };
+  try {
+    const rawListing = await listingGenerator.generate({
+      attributes: mergedAttributes,
+      currency: DEFAULT_LISTING_CURRENCY,
+    });
+
+    const listingResult = GeneratedListingSchema.safeParse(rawListing);
+    if (!listingResult.success) {
+      throw new ListingGenerationValidationError("Generated listing failed schema validation");
+    }
+    validateListingClaims(listingResult.data, mergedAttributes);
+
+    const listingDraft = await createListingDraft(
+      conversationId,
+      updatedDraft._id.toString(),
+      listingResult.data,
+    );
+
+    assertTransition(workingConversation.state, "draft_ready");
+    workingConversation = await updateConversationState(workingConversation, "draft_ready");
+
+    const assistantMessage = await createMessage({
+      conversationId,
+      role: "assistant",
+      content: "Your listing draft is ready for review.",
+      clientMessageId: `assistant-${randomUUID()}`,
+    });
+
+    return {
+      kind: "ok",
+      conversation: workingConversation,
+      itemDraft: updatedDraft,
+      assistantMessage,
+      listingDraft,
+    };
+  } catch (err) {
+    // No partial ListingDraft exists (createListingDraft only runs after
+    // schema + claims validation succeed), so the item facts are
+    // untouched. Roll back to ready_to_generate — the direct predecessor
+    // of `generating` — so this is retryable instead of a dead end.
+    workingConversation = await updateConversationState(workingConversation, "ready_to_generate");
+    return {
+      kind: "listing_generation_failed",
+      conversation: workingConversation,
+      itemDraft: updatedDraft,
+      reason: err instanceof ListingGenerationValidationError ? "invalid_output" : "provider_error",
+    };
+  }
 }

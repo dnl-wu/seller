@@ -48,7 +48,12 @@ export function questionForField(field: keyof ItemAttributes): string {
 const VALID_TRANSITIONS: Record<ConversationState, readonly ConversationState[]> = {
   collecting: ["ready_to_generate"],
   ready_to_generate: ["generating"],
-  generating: ["draft_ready"],
+  // `generating -> ready_to_generate` is a recovery transition, not a
+  // forward step: if listing generation fails (provider error or output
+  // that fails validation), the conversation falls back to its direct
+  // predecessor state so a retry is possible, instead of being stuck in
+  // `generating` forever or forced into `draft_ready` with no listing.
+  generating: ["draft_ready", "ready_to_generate"],
   draft_ready: ["approved"],
   approved: [],
 };

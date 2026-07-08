@@ -77,6 +77,11 @@ describe("state transitions", () => {
     expect(canTransition("approved", "draft_ready")).toBe(false);
   });
 
+  it("allows the generating -> ready_to_generate recovery transition for failed listing generation", () => {
+    expect(canTransition("generating", "ready_to_generate")).toBe(true);
+    expect(() => assertTransition("generating", "ready_to_generate")).not.toThrow();
+  });
+
   it("throws for invalid transitions and is silent for valid ones", () => {
     expect(() => assertTransition("collecting", "ready_to_generate")).not.toThrow();
     expect(() => assertTransition("approved", "collecting")).toThrow(

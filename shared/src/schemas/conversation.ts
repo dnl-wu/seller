@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ConversationStateSchema } from "./enums.js";
 import { ItemDraftSchema } from "./itemDraft.js";
 import { MessageSchema } from "./message.js";
+import { ListingDraftSchema } from "./listingDraft.js";
 
 export const ConversationSchema = z.object({
   id: z.string().min(1),
@@ -32,6 +33,7 @@ export const GetConversationResponseSchema = z.object({
   conversation: ConversationSchema,
   itemDraft: ItemDraftSchema.nullable(),
   messages: z.array(MessageSchema),
+  listingDraft: ListingDraftSchema.nullable(),
 });
 export type GetConversationResponse = z.infer<
   typeof GetConversationResponseSchema
@@ -41,5 +43,6 @@ export const PostMessageResponseSchema = z.object({
   conversation: ConversationSchema,
   itemDraft: ItemDraftSchema.nullable(),
   assistantMessage: MessageSchema.nullable(),
+  listingDraft: ListingDraftSchema.nullable(),
 });
 export type PostMessageResponse = z.infer<typeof PostMessageResponseSchema>;

@@ -6,6 +6,7 @@ import {
   serializeConversation,
   serializeItemDraft,
   serializeMessage,
+  serializeListingDraft,
 } from "./serializers.js";
 
 export async function createConversation(req: Request, res: Response): Promise<void> {
@@ -39,11 +40,12 @@ export async function getConversation(req: Request, res: Response): Promise<void
     return;
   }
 
-  const { conversation, itemDraft, messages } = result;
+  const { conversation, itemDraft, messages, listingDraft } = result;
   res.json({
     conversation: serializeConversation(conversation),
     itemDraft: itemDraft ? serializeItemDraft(itemDraft) : null,
     messages: messages.map(serializeMessage),
+    listingDraft: listingDraft ? serializeListingDraft(listingDraft) : null,
   });
 }
 
@@ -84,6 +86,18 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
       res.status(502).json({ error: messages[result.reason] });
       return;
     }
+    case "listing_generation_failed": {
+      const messages: Record<typeof result.reason, string> = {
+        provider_error: "Listing generation is temporarily unavailable. Please try again.",
+        invalid_output: "Listing generation produced invalid content. Please try again.",
+      };
+      res.status(502).json({
+        error: messages[result.reason],
+        conversation: serializeConversation(result.conversation),
+        itemDraft: serializeItemDraft(result.itemDraft),
+      });
+      return;
+    }
     case "duplicate":
       res.status(200).json({
         conversation: serializeConversation(result.conversation),
@@ -91,6 +105,7 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
         assistantMessage: result.assistantMessage
           ? serializeMessage(result.assistantMessage)
           : null,
+        listingDraft: result.listingDraft ? serializeListingDraft(result.listingDraft) : null,
       });
       return;
     case "ok":
@@ -98,6 +113,7 @@ export async function postMessage(req: Request, res: Response): Promise<void> {
         conversation: serializeConversation(result.conversation),
         itemDraft: serializeItemDraft(result.itemDraft),
         assistantMessage: serializeMessage(result.assistantMessage),
+        listingDraft: result.listingDraft ? serializeListingDraft(result.listingDraft) : null,
       });
       return;
   }

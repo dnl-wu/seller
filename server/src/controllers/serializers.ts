@@ -1,7 +1,8 @@
-import type { Conversation, ItemDraft, Message } from "@seller/shared";
+import type { Conversation, ItemDraft, ListingDraft, Message } from "@seller/shared";
 import type { ConversationDocument } from "../models/Conversation.js";
 import type { ItemDraftDocument } from "../models/ItemDraft.js";
 import type { MessageDocument } from "../models/Message.js";
+import type { ListingDraftDocument } from "../models/ListingDraft.js";
 
 export function serializeConversation(doc: ConversationDocument): Conversation {
   return {
@@ -32,5 +33,20 @@ export function serializeMessage(doc: MessageDocument): Message {
     content: doc.content,
     clientMessageId: doc.clientMessageId,
     createdAt: doc.createdAt.toISOString(),
+  };
+}
+
+export function serializeListingDraft(doc: ListingDraftDocument): ListingDraft {
+  return {
+    id: doc._id.toString(),
+    conversationId: doc.conversationId.toString(),
+    itemDraftId: doc.itemDraftId.toString(),
+    title: doc.title,
+    description: doc.description,
+    suggestedPrice: doc.suggestedPrice,
+    currency: doc.currency,
+    status: doc.status,
+    createdAt: doc.createdAt.toISOString(),
+    updatedAt: doc.updatedAt.toISOString(),
   };
 }
